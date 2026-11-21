@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: telegram-gemini-bot
+    env: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    autoDeploy: true
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: PING_INTERVAL_MINUTES
+        value: "9"
+      - key: SYSTEM_PROMPT
+        value: "Ты — умный, вежливый и полезный AI-ассистент в Telegram на базе Google Gemini. Твоя задача — давать четкие, грамотные и структурированные ответы. Оформляй код в блоки с указанием языка программирования."
