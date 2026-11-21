@@ -206,7 +206,6 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
             KeyboardButton(text="📊 Статус / Пинг"),
         ],
         [
-            KeyboardButton(text="⚙️ Админ-панель"),
             KeyboardButton(text="❓ Помощь"),
         ],
     ]
@@ -476,13 +475,12 @@ async def cmd_draw_menu(message: types.Message):
 async def cmd_help(message: types.Message):
     log_mgr.track_user(message.from_user)
     help_text = (
-        "📖 *Руководство по взаимодействию:*\n\n"
+        "📖 *Руководство по боту:*\n\n"
         "1. *Общение:* Просто отправляйте текстовые сообщения.\n"
         "2. *Режимы:* Нажмите «🎭 Сменить режим» или введите `/menu` для переключения персон (Кодер, Креатив, Репетитор и др.).\n"
         "3. *Генерация картинок:* Нажмите «🎨 Нарисовать арт» или напишите «_Нарисуй кота-самурая_» / команду `/image <текст>`.\n"
         "4. *Новый разговор:* Кнопка «💬 Новый диалог» сбрасывает память контекста.\n"
-        "5. *Админка:* Кнопка «⚙️ Админ-панель» или `/admin` открывает просмотр логов и статистики (доступ защищен паролем).\n"
-        "6. *Статус сервера:* Кнопка «📊 Статус / Пинг» покажет непрерывный аптайм сервера Render."
+        "5. *Статус сервера:* Кнопка «📊 Статус / Пинг» покажет непрерывный аптайм сервера Render."
     )
     await safe_send_message(message.chat.id, help_text, reply_markup=get_main_reply_keyboard())
 
@@ -513,10 +511,9 @@ async def cmd_ping(message: types.Message):
     await safe_send_message(message.chat.id, status_text, reply_markup=get_main_reply_keyboard())
 
 
-# --- Админ-панель (Telegram) ---
+# --- Админ-панель (доступна только по секретной команде /admin <пароль>) ---
 
 @dp.message(Command("admin"))
-@dp.message(F.text == "⚙️ Админ-панель")
 async def cmd_admin(message: types.Message):
     user = message.from_user
     log_mgr.track_user(user)
