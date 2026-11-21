@@ -21,6 +21,8 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     CallbackQuery,
+    BotCommand,
+    BotCommandScopeDefault,
 )
 
 import google.generativeai as genai
@@ -220,10 +222,29 @@ bot = Bot(
 dp = Dispatcher()
 
 
+# --- Меню команд Telegram (подсказки при вводе "/") ---
+
+async def setup_bot_commands():
+    """Регистрирует команды бота в Telegram, чтобы при вводе '/' появлялись всплывающие подсказки."""
+    commands = [
+        BotCommand(command="start", description="🚀 Главное меню и приветствие"),
+        BotCommand(command="menu", description="🎭 Выбрать режим общения (персону)"),
+        BotCommand(command="image", description="🎨 Создать картинку (Flux 1024x1024)"),
+        BotCommand(command="reset", description="🧹 Очистить контекст диалога"),
+        BotCommand(command="ping", description="🏓 Проверить статус сервера и моделей"),
+        BotCommand(command="help", description="📖 Подробная справка по боту"),
+    ]
+    try:
+        await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+        logger.info("Подсказки команд Telegram успешно зарегистрированы!")
+    except Exception as e:
+        logger.warning(f"Не удалось зарегистрировать подсказки команд: {e}")
+
+
 # --- Клавиатуры и Меню ---
 
 def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
-    """Главная нижняя клавиатура быстрого доступа (без кнопки админки, скрыта для пользователей)."""
+    """Главная нижняя клавиатура быстрого доступа для обычных пользователей."""
     kb = [
         [
             KeyboardButton(text="💬 Новый диалог"),
@@ -235,6 +256,25 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
         ],
         [
             KeyboardButton(text="❓ Помощь"),
+        ],
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+
+def get_admin_reply_keyboard() -> ReplyKeyboardMarkup:
+    """Нижняя панель управления администратора с быстрыми кнопками."""
+    kb = [
+        [
+            KeyboardButton(text="📋 Лента логов"),
+            KeyboardButton(text="👥 Список пользователей"),
+        ],
+        [
+            KeyboardButton(text="📷 Медиа-логи"),
+            KeyboardButton(text="⚠️ Ошибки"),
+        ],
+        [
+            KeyboardButton(text="📊 Статус / Пинг"),
+            KeyboardButton(text="🔙 Обычное меню"),
         ],
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
@@ -274,14 +314,14 @@ def get_admin_inline_keyboard() -> InlineKeyboardMarkup:
     kb = [
         [
             InlineKeyboardButton(text="🔄 Обновить логи", callback_query_data="admin:refresh"),
-            InlineKeyboardButton(text="📷 Только медиа (Фото/Видео)", callback_query_data="admin:media"),
+            InlineKeyboardButton(text="📷 Только медиа", callback_query_data="admin:media"),
         ],
         [
-            InlineKeyboardButton(text="👥 Список пользователей", callback_query_data="admin:users"),
+            InlineKeyboardButton(text="👥 Пользователи", callback_query_data="admin:users"),
             InlineKeyboardButton(text="⚠️ Ошибки", callback_query_data="admin:errors"),
         ],
         [
-            InlineKeyboardButton(text="🌐 Открыть Веб-панель (таблица)", url=web_url),
+            InlineKeyboardButton(text="🌐 Открыть Веб-панель", url=web_url),
         ],
         [
             InlineKeyboardButton(text="🧹 Очистить логи", callback_query_data="admin:clear_logs"),
@@ -296,11 +336,10 @@ def get_admin_inline_keyboard() -> InlineKeyboardMarkup:
 def format_user_activity_feed(records: list) -> str:
     """Форматирует детальные логи запросов пользователей для вывода в Telegram."""
     if not records:
-        return "📭 _Журнал действий пока пуст. Как только пользователи начнут писать, искать, отправлять фото или видео — их действия появятся здесь._"
+        return "📭 _Журнал действий пока пуст. Как только пользователи напишут или отправят фото/видео — они появятся здесь._"
 
     lines = ["📋 *Детальный журнал действий пользователей:*\n"]
     for r in records:
-        # Иконка типа действия
         ev = r["event"]
         icon = "💬"
         if "ФОТО" in ev:
@@ -325,6 +364,45 @@ def format_user_activity_feed(records: list) -> str:
             entry += f"🤖 _Ответ бота:_ {r['bot_reply'][:120]}...\n"
         entry += "─────────────────────────"
         lines.append(entry)
+
+    return "\n".join(lines)
+
+
+# --- Проверка статуса и пинга разных моделей Gemini ---
+
+MODELS_PROBE = [
+    ("gemini-3.5-flash", "Gemini 3.5 Flash"),
+    ("gemini-3.8-flash", "Gemini 3.8 Flash"),
+    ("gemini-flash-latest", "Gemini Flash Latest"),
+    ("gemini-2.5-pro", "Gemini 2.5 Pro"),
+    ("gemini-2.5-flash", "Gemini 2.5 Flash"),
+]
+
+
+async def probe_gemini_models() -> str:
+    """Тестирует отклик и работоспособность различных моделей Google Gemini."""
+    lines = []
+    loop = asyncio.get_running_loop()
+
+    for model_id, label in MODELS_PROBE:
+        is_current = " 🌟 *(Текущая)*" if model_id == config.GEMINI_MODEL else ""
+        t0 = time.time()
+        try:
+            m = genai.GenerativeModel(model_id)
+            await loop.run_in_executor(
+                None,
+                lambda m=m: m.generate_content("test", generation_config=genai.types.GenerationConfig(max_output_tokens=1))
+            )
+            latency = int((time.time() - t0) * 1000)
+            lines.append(f"• 🟢 *{label}*: `Работает ({latency} ms)`{is_current}")
+        except Exception as e:
+            err_text = str(e).lower()
+            if "404" in err_text or "not found" in err_text or "no longer available" in err_text:
+                lines.append(f"• 🔴 *{label}*: `Недоступна (404 / Устарела)`{is_current}")
+            elif "429" in err_text or "resourceexhausted" in err_text:
+                lines.append(f"• 🟡 *{label}*: `Перегружена (429 Лимит)`{is_current}")
+            else:
+                lines.append(f"• ⚠️ *{label}*: `Ошибка отклика`{is_current}")
 
     return "\n".join(lines)
 
@@ -494,6 +572,9 @@ async def cmd_start(message: types.Message):
     cur_mode = get_user_mode(message.from_user.id)
     mode_title = MODES[cur_mode]["title"]
 
+    is_admin = message.from_user.id in authenticated_admins
+    active_kb = get_admin_reply_keyboard() if is_admin else get_main_reply_keyboard()
+
     welcome_text = (
         f"👋 *Привет, {message.from_user.first_name}!*\n\n"
         f"Я интеллектуальный ассистент с искусственным интеллектом на базе *Google Gemini* ({config.GEMINI_MODEL}).\n\n"
@@ -504,9 +585,9 @@ async def cmd_start(message: types.Message):
         f"• 📸 Анализировать присланные вами фотографии\n"
         f"• 💻 Писать, проверять и объяснять программный код\n"
         f"• 🧠 Запоминать контекст нашей беседы\n\n"
-        f"Используйте кнопки нижнего меню для быстрого взаимодействия!"
+        f"Используйте кнопки нижнего меню или пишите в чат!"
     )
-    await safe_send_message(message.chat.id, welcome_text, reply_markup=get_main_reply_keyboard())
+    await safe_send_message(message.chat.id, welcome_text, reply_markup=active_kb)
 
 
 @dp.message(Command("menu"))
@@ -536,10 +617,13 @@ async def cmd_reset(message: types.Message):
     log_mgr.add_user_activity(message.from_user, "КОНТЕКСТ", "Сбросил память диалога")
     reset_user_chat(message.from_user.id)
     cur_mode = get_user_mode(message.from_user.id)
+    is_admin = message.from_user.id in authenticated_admins
+    active_kb = get_admin_reply_keyboard() if is_admin else get_main_reply_keyboard()
+
     await safe_send_message(
         message.chat.id,
         f"🧹 *Память диалога очищена.*\nТекущий режим: *{MODES[cur_mode]['title']}*. Жду ваш вопрос!",
-        reply_markup=get_main_reply_keyboard()
+        reply_markup=active_kb
     )
 
 
@@ -552,39 +636,63 @@ async def cmd_draw_menu(message: types.Message):
 @dp.message(F.text == "❓ Помощь")
 async def cmd_help(message: types.Message):
     log_mgr.add_user_activity(message.from_user, "СПРАВКА", "Запросил /help")
+    is_admin = message.from_user.id in authenticated_admins
+    active_kb = get_admin_reply_keyboard() if is_admin else get_main_reply_keyboard()
+
     help_text = (
         "📖 *Руководство по боту:*\n\n"
         "1. *Общение и поиск:* Просто пишите вопросы или что хотите найти — я подробно отвечу.\n"
         "2. *Анализ фото:* Отправьте мне любую фотографию (с вопросом или без), и я разберу, что на ней изображено.\n"
         "3. *Генерация картинок:* Нажмите «🎨 Нарисовать арт» или напишите «_Нарисуй кота-самурая_» / команду `/image <текст>`.\n"
         "4. *Режимы:* Нажмите «🎭 Сменить режим» для переключения персон (Кодер, Креатив, Репетитор и др.).\n"
-        "5. *Новый разговор:* Кнопка «💬 Новый диалог» сбрасывает память контекста."
+        "5. *Новый разговор:* Кнопка «💬 Новый диалог» сбрасывает память контекста.\n"
+        "6. *Команды в чате:* Наберите знак `/` прямо в поле ввода, чтобы увидеть список доступных команд."
     )
-    await safe_send_message(message.chat.id, help_text, reply_markup=get_main_reply_keyboard())
+    await safe_send_message(message.chat.id, help_text, reply_markup=active_kb)
 
 
 @dp.message(Command("ping"))
 @dp.message(F.text == "📊 Статус / Пинг")
 async def cmd_ping(message: types.Message):
-    log_mgr.add_user_activity(message.from_user, "СТАТУС", "Запросил /ping")
+    """Проверка доступности сервера и пинг всех сетей Gemini (2.5, 3.5, 3.8, latest)."""
+    log_mgr.add_user_activity(message.from_user, "СТАТУС", "Запросил /ping и проверку моделей")
+    await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
+
+    wait_msg = await bot.send_message(
+        chat_id=message.chat.id,
+        text="🏓 *Тестирую отклик сервера и проверяю доступность моделей Gemini...*"
+    )
+
     uptime_sec = int(time.time() - START_TIME)
     hours, remainder = divmod(uptime_sec, 3600)
     minutes, seconds = divmod(remainder, 60)
     uptime_str = f"{hours}ч {minutes}м {seconds}с"
     cur_mode = get_user_mode(message.from_user.id)
 
+    # Проверяем доступность и задержку моделей
+    models_report = await probe_gemini_models()
+
     status_text = (
-        "🏓 *Статус системы:*\n\n"
+        "🏓 *Статус системы и моделей Google:*\n\n"
+        "🖥 *Сервер и бот:*\n"
         f"• *Статус:* Активен 🟢\n"
-        f"• *Аптайм:* `{uptime_str}`\n"
-        f"• *Модель Gemini:* `{config.GEMINI_MODEL}`\n"
+        f"• *Непрерывный аптайм:* `{uptime_str}`\n"
         f"• *Ваш режим:* {MODES[cur_mode]['title']}\n"
-        f"• *Генерация фото:* Активна (Flux 1024x1024)\n"
-        f"• *Сообщений обработано:* {log_mgr.total_messages}\n"
-        f"• *Картинок сгенерировано:* {log_mgr.total_images}\n"
-        f"• *Пользователей всего:* {len(log_mgr.unique_users)}"
+        f"• *Сообщений:* {log_mgr.total_messages} | *Артов Flux:* {log_mgr.total_images}\n"
+        f"• *Пользователей:* {len(log_mgr.unique_users)}\n\n"
+        "🤖 *Работоспособность сетей Gemini:*\n"
+        f"{models_report}"
     )
-    await safe_send_message(message.chat.id, status_text, reply_markup=get_main_reply_keyboard())
+
+    is_admin = message.from_user.id in authenticated_admins
+    active_kb = get_admin_reply_keyboard() if is_admin else get_main_reply_keyboard()
+
+    try:
+        await wait_msg.delete()
+    except Exception:
+        pass
+
+    await safe_send_message(message.chat.id, status_text, reply_markup=active_kb)
 
 
 # --- Секретная Админ-панель (только по команде /admin <пароль>) ---
@@ -614,7 +722,7 @@ async def cmd_admin(message: types.Message):
         )
         return
 
-    # Авторизованному админу сразу выводим детальные логи пользователей
+    # Авторизованному админу выдаем админскую клавиатуру и детальные логи пользователей
     recent_logs = log_mgr.get_recent(count=10)
     feed_text = format_user_activity_feed(recent_logs)
 
@@ -626,10 +734,64 @@ async def cmd_admin(message: types.Message):
         f"👑 *Панель управления администратора*\n"
         f"• *Аптайм:* {hours}ч {minutes}м {seconds}с | *Пользователей:* {len(log_mgr.unique_users)}\n"
         f"• *Сообщений:* {log_mgr.total_messages} | *Картинок:* {log_mgr.total_images} | *Фото:* {log_mgr.total_photos}\n\n"
+        "✨ _Вам включена нижняя клавиатура администратора._\n\n"
     )
 
     full_text = header_text + feed_text
-    await safe_send_message(message.chat.id, full_text, reply_markup=get_admin_inline_keyboard())
+    await safe_send_message(message.chat.id, full_text, reply_markup=get_admin_reply_keyboard())
+
+
+# --- Обработчики кнопок Админ-клавиатуры ---
+
+@dp.message(F.text == "📋 Лента логов")
+async def admin_btn_feed(message: types.Message):
+    if message.from_user.id not in authenticated_admins:
+        return
+    recent_logs = log_mgr.get_recent(count=12)
+    feed_text = format_user_activity_feed(recent_logs)
+    await safe_send_message(message.chat.id, feed_text, reply_markup=get_admin_reply_keyboard())
+
+
+@dp.message(F.text == "👥 Список пользователей")
+async def admin_btn_users(message: types.Message):
+    if message.from_user.id not in authenticated_admins:
+        return
+    users = list(log_mgr.unique_users.values())
+    if not users:
+        await safe_send_message(message.chat.id, "👥 *Пользователей пока нет.*", reply_markup=get_admin_reply_keyboard())
+    else:
+        lines = ["👥 *Список пользователей бота:*"]
+        for u in users[-25:]:
+            uname = f"@{u['username']}" if u['username'] else "нет username"
+            lines.append(f"• *{u['first_name']}* ({uname}, ID: `{u['id']}`) — запросов: {u['msg_count']}, последний: {u['last_seen']}")
+        await safe_send_message(message.chat.id, "\n".join(lines), reply_markup=get_admin_reply_keyboard())
+
+
+@dp.message(F.text == "📷 Медиа-логи")
+async def admin_btn_media(message: types.Message):
+    if message.from_user.id not in authenticated_admins:
+        return
+    recent_media = log_mgr.get_recent(count=15, media_only=True)
+    feed_text = format_user_activity_feed(recent_media)
+    await safe_send_message(message.chat.id, "📷 *Журнал присланных медиа (Фото / Видео / Арты):*\n\n" + feed_text, reply_markup=get_admin_reply_keyboard())
+
+
+@dp.message(F.text == "⚠️ Ошибки")
+async def admin_btn_errors(message: types.Message):
+    if message.from_user.id not in authenticated_admins:
+        return
+    err_logs = log_mgr.get_recent(count=15, errors_only=True)
+    feed_text = format_user_activity_feed(err_logs)
+    await safe_send_message(message.chat.id, "⚠️ *Журнал ошибок:*\n\n" + feed_text, reply_markup=get_admin_reply_keyboard())
+
+
+@dp.message(F.text == "🔙 Обычное меню")
+async def admin_btn_switch_menu(message: types.Message):
+    await safe_send_message(
+        message.chat.id,
+        "🔄 *Переключено на стандартное меню пользователя.*",
+        reply_markup=get_main_reply_keyboard()
+    )
 
 
 # --- Обработчик Инлайн-кнопок (Callback Queries) ---
@@ -653,10 +815,12 @@ async def handle_callbacks(callback: CallbackQuery):
                 await callback.message.edit_reply_markup(reply_markup=get_modes_inline_keyboard(new_mode))
             except Exception:
                 pass
+            is_admin = user_id in authenticated_admins
+            active_kb = get_admin_reply_keyboard() if is_admin else get_main_reply_keyboard()
             await bot.send_message(
                 chat_id=user_id,
                 text=f"✨ *Установлен режим:* {title}\n_{MODES[new_mode]['description']}_\n\nПамять диалога обновлена под новый стиль!",
-                reply_markup=get_main_reply_keyboard(),
+                reply_markup=active_kb,
                 parse_mode=ParseMode.MARKDOWN
             )
         return
@@ -693,40 +857,40 @@ async def handle_callbacks(callback: CallbackQuery):
             recent_logs = log_mgr.get_recent(count=12)
             feed_text = format_user_activity_feed(recent_logs)
             await callback.answer("Логи обновлены!")
-            await safe_send_message(user_id, "🔄 *Обновленный журнал действий пользователей:*\n\n" + feed_text, reply_markup=get_admin_inline_keyboard())
+            await safe_send_message(user_id, "🔄 *Обновленный журнал действий:*\n\n" + feed_text, reply_markup=get_admin_reply_keyboard())
             return
 
         if action == "media":
             recent_media = log_mgr.get_recent(count=15, media_only=True)
             feed_text = format_user_activity_feed(recent_media)
             await callback.answer("Медиа-логи получены!")
-            await safe_send_message(user_id, "📷 *Журнал присланных медиа (Фото / Видео / Арты):*\n\n" + feed_text, reply_markup=get_admin_inline_keyboard())
+            await safe_send_message(user_id, "📷 *Журнал присланных медиа:*\n\n" + feed_text, reply_markup=get_admin_reply_keyboard())
             return
 
         if action == "errors":
             err_logs = log_mgr.get_recent(count=15, errors_only=True)
             feed_text = format_user_activity_feed(err_logs)
             await callback.answer("Ошибки получены!")
-            await safe_send_message(user_id, "⚠️ *Журнал ошибок:*\n\n" + feed_text, reply_markup=get_admin_inline_keyboard())
+            await safe_send_message(user_id, "⚠️ *Журнал ошибок:*\n\n" + feed_text, reply_markup=get_admin_reply_keyboard())
             return
 
         if action == "users":
             users = list(log_mgr.unique_users.values())
             await callback.answer()
             if not users:
-                await safe_send_message(user_id, "👥 *Пользователей пока нет.*")
+                await safe_send_message(user_id, "👥 *Пользователей пока нет.*", reply_markup=get_admin_reply_keyboard())
             else:
                 lines = ["👥 *Список пользователей бота:*"]
                 for u in users[-25:]:
                     uname = f"@{u['username']}" if u['username'] else "нет username"
                     lines.append(f"• *{u['first_name']}* ({uname}, ID: `{u['id']}`) — запросов: {u['msg_count']}, последний: {u['last_seen']}")
-                await safe_send_message(user_id, "\n".join(lines), reply_markup=get_admin_inline_keyboard())
+                await safe_send_message(user_id, "\n".join(lines), reply_markup=get_admin_reply_keyboard())
             return
 
         if action == "clear_logs":
             log_mgr.clear()
             await callback.answer("Логи очищены!", show_alert=True)
-            await safe_send_message(user_id, "🧹 *Журнал логов успешно очищен.*", reply_markup=get_admin_inline_keyboard())
+            await safe_send_message(user_id, "🧹 *Журнал логов успешно очищен.*", reply_markup=get_admin_reply_keyboard())
             return
 
         if action == "logout":
@@ -753,13 +917,11 @@ async def handle_incoming_photo(message: types.Message):
     await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
 
     try:
-        # Скачиваем самое качественное фото
         photo = message.photo[-1]
         file_io = io.BytesIO()
         await bot.download(photo, destination=file_io)
         img_bytes = file_io.getvalue()
 
-        # Анализируем через Gemini Vision
         prompt = caption if caption else "Опиши подробно, что изображено на этой фотографии."
         image_part = {"mime_type": "image/jpeg", "data": img_bytes}
 
@@ -782,7 +944,6 @@ async def handle_incoming_photo(message: types.Message):
 
 @dp.message(F.video)
 async def handle_incoming_video(message: types.Message):
-    """Фиксация присланных видео в логах."""
     user = message.from_user
     caption = message.caption or ""
     duration = message.video.duration if message.video else 0
@@ -795,7 +956,6 @@ async def handle_incoming_video(message: types.Message):
 
 @dp.message(F.voice)
 async def handle_incoming_voice(message: types.Message):
-    """Фиксация голосовых сообщений."""
     user = message.from_user
     duration = message.voice.duration if message.voice else 0
     log_content = f"Прислал ГОЛОСОВОЕ сообщение (длительность: {duration}с)"
@@ -806,7 +966,6 @@ async def handle_incoming_voice(message: types.Message):
 
 @dp.message(F.document)
 async def handle_incoming_document(message: types.Message):
-    """Фиксация документов."""
     user = message.from_user
     doc_name = message.document.file_name or "файл"
     log_content = f"Прислал ДОКУМЕНТ «{doc_name}»"
@@ -878,7 +1037,9 @@ async def handle_message(message: types.Message):
             bot_reply=answer,
             status="OK"
         )
-        await safe_send_message(message.chat.id, answer)
+        is_admin = user_id in authenticated_admins
+        active_kb = get_admin_reply_keyboard() if is_admin else get_main_reply_keyboard()
+        await safe_send_message(message.chat.id, answer, reply_markup=active_kb)
 
     except Exception as e:
         log_mgr.total_errors += 1
@@ -1130,7 +1291,7 @@ async def keep_alive_task():
 # --- Главная функция запуска ---
 
 async def main():
-    logger.info("Запуск Telegram Gemini бота с расширенным логированием действий...")
+    logger.info("Запуск Telegram Gemini бота с расширенным меню, логированием и мультимодельным пингом...")
 
     web_app = create_web_app()
     runner = web.AppRunner(web_app)
@@ -1142,6 +1303,9 @@ async def main():
     ping_bg_task = asyncio.create_task(keep_alive_task())
 
     try:
+        # Установка всплывающих подсказок команд Telegram при вводе "/"
+        await setup_bot_commands()
+
         logger.info("🤖 Запуск Long Polling для Telegram...")
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
