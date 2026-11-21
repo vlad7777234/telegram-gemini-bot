@@ -1,24 +1,23 @@
 import os
 from dotenv import load_dotenv
 
-# Загружаем переменные из .env при локальном запуске
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash").strip()
 
-# Render автоматически задает RENDER_EXTERNAL_URL и PORT
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
 PORT = int(os.getenv("PORT", "10000"))
-
-# Интервал пинга в минутах (по умолчанию 9 минут)
 PING_INTERVAL_MINUTES = int(os.getenv("PING_INTERVAL_MINUTES", "9"))
-
-# Максимальное количество сообщений в истории диалога для каждого пользователя
 MAX_HISTORY_LENGTH = int(os.getenv("MAX_HISTORY_LENGTH", "20"))
 
-# Системный промпт по умолчанию
+# Секретный пароль для доступа к админ-панели (в Telegram и на Web-странице)
+ADMIN_SECRET = os.getenv("ADMIN_SECRET", "admin777").strip()
+
+# Telegram ID главного администратора (опционально, можно также авторизоваться паролем)
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0")) if os.getenv("ADMIN_ID", "").strip().isdigit() else 0
+
 DEFAULT_SYSTEM_PROMPT = (
     "Ты — умный, дружелюбный и экспертный AI-ассистент в Telegram на базе Google Gemini. "
     "Твои ответы должны быть четкими, информативными, логичными и красиво оформленными. "
@@ -35,6 +34,5 @@ def validate_config():
         missing.append("GEMINI_API_KEY")
     if missing:
         raise ValueError(
-            f"Отсутствуют обязательные переменные окружения: {', '.join(missing)}. "
-            f"Пожалуйста, укажите их в файле .env или в панели управления Render!"
+            f"Отсутствуют обязательные переменные окружения: {', '.join(missing)}."
         )
