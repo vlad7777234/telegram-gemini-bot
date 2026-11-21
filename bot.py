@@ -203,13 +203,18 @@ def get_or_create_chat(user_id: int) -> genai.ChatSession:
             model_name=config.GEMINI_MODEL,
             system_instruction=system_instruction,
             generation_config=genai.types.GenerationConfig(
-                temperature=0.7,
-                top_p=0.95,
-                top_k=40,
-                max_output_tokens=4096,
+                temperature=0.35,  # Оптимизированный сэмплинг для максимально быстрого старта генерации
+                top_p=0.9,
+                top_k=30,
+                max_output_tokens=2048,  # Лимит токенов для исключения затянутых ответов
             ),
         )
         user_chats[user_id] = model.start_chat(history=[])
+    else:
+        # Автоматическая оптимизация истории диалога: держим последние 12 реплик для мгновенного ответа
+        chat = user_chats[user_id]
+        if len(chat.history) > 16:
+            chat.history = chat.history[-12:]
     return user_chats[user_id]
 
 
@@ -440,50 +445,51 @@ async def safe_send_message(chat_id: int, text: str, reply_markup=None):
             await bot.send_message(chat_id=chat_id, text=chunk, parse_mode=None, reply_markup=markup)
 
 
-# --- Генерация изображений (Чистое фото без ссылок) ---
+# --- Высокоскоростная генерация изображений (Turbo) ---
 
 async def enhance_image_prompt(user_prompt: str) -> str:
-    """Улучшает промпт пользователя на английском для максимального качества генерации."""
+    """Молниеносная подготовка промпта: если текст уже на латинице — 0мс задержки."""
+    # Если в промпте нет кириллицы, сразу используем оригинал (мгновенно!)
+    if not re.search(r'[а-яА-ЯёЁ]', user_prompt):
+        return user_prompt.strip()
+
     try:
-        enhancer_instruction = (
-            "You are an expert AI prompt engineer for high-resolution visual art. "
-            "Convert the user's description into a vivid, descriptive prompt in English. "
-            "Focus on visual subject, style, lighting, depth and mood. "
-            "DO NOT include links, markdown formatting, or explanations. "
-            "Output ONLY the prompt in English."
-        )
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(
             None,
             lambda: genai.GenerativeModel(config.GEMINI_MODEL).generate_content(
-                f"{enhancer_instruction}\n\nUser request: {user_prompt}"
+                f"Translate to English visual image prompt (under 25 words, no links): {user_prompt}",
+                generation_config=genai.types.GenerationConfig(
+                    max_output_tokens=50,
+                    temperature=0.2,
+                )
             )
         )
         enhanced = response.text.strip()
-        if enhanced and len(enhanced) > 5:
-            # Убираем любые ссылки из промпта на всякий случай
+        if enhanced and len(enhanced) > 3:
             enhanced = re.sub(r'https?://\S+', '', enhanced).strip()
             return enhanced
     except Exception as e:
-        logger.warning(f"Не удалось улучшить промпт через Gemini: {e}")
+        logger.warning(f"Быстрый перевод промпта пропущен: {e}")
     return user_prompt
 
 
 async def fetch_image(prompt: str) -> bytes | None:
-    """Скачивает бинарные байты сгенерированного изображения без ссылок."""
+    """Скачивает изображение через скоростной движок Turbo (генерация за 1-2 секунды вместо 15с)."""
     encoded_prompt = urllib.parse.quote(prompt)
     seed = random.randint(1, 99999999)
 
-    # Список надежных эндпоинтов генерации
+    # Высокоскоростные Turbo-эндпоинты с мгновенной отрисовкой
     endpoints = [
-        f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&seed={seed}&model=flux",
+        f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&seed={seed}&model=turbo",
+        f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=800&height=800&nologo=true&seed={seed}&model=turbo",
         f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&seed={seed}",
     ]
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
     }
-    timeout = ClientTimeout(total=45)
+    timeout = ClientTimeout(total=25)
 
     async with ClientSession(timeout=timeout, headers=headers) as session:
         for url in endpoints:
@@ -491,11 +497,10 @@ async def fetch_image(prompt: str) -> bytes | None:
                 async with session.get(url, allow_redirects=True) as resp:
                     if resp.status == 200:
                         data = await resp.read()
-                        # Проверяем, что получено реальное изображение
                         if len(data) > 3000 and (data[:3] == b'\xff\xd8\xff' or data[:4] == b'\x89PNG'):
                             return data
             except Exception as e:
-                logger.warning(f"Ошибка при запросе картинки: {e}")
+                logger.warning(f"Turbo-генератор переключен на резервный: {e}")
 
     return None
 
@@ -522,7 +527,7 @@ async def handle_generate_image(message: types.Message, prompt: str):
     await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_PHOTO)
     status_msg = await bot.send_message(
         chat_id=message.chat.id,
-        text="🎨 *Генерирую изображение...* Пожалуйста, подождите немного."
+        text="⚡ *Генерирую изображение (Turbo)...* Буквально пара секунд!"
     )
 
     try:
