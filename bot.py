@@ -1,6 +1,7 @@
 import asyncio
 import io
 import html
+import json
 import logging
 import random
 import re
@@ -51,6 +52,7 @@ class LogManager:
         self.total_images = 0
         self.total_photos = 0
         self.total_videos = 0
+        self.total_games = 0
         self.total_pings = 0
         self.total_errors = 0
         self.unique_users = {}
@@ -131,11 +133,42 @@ class LogManager:
 log_mgr = LogManager()
 
 
+# --- Игровая система: Статистика, Очки, Ранги ---
+
+user_game_stats: dict[int, dict] = {}
+user_active_games: dict[int, dict] = {}
+
+
+def get_user_stats(user_id: int) -> dict:
+    if user_id not in user_game_stats:
+        user_game_stats[user_id] = {
+            "score": 0,
+            "trivia_correct": 0,
+            "trivia_total": 0,
+            "quest_completed": 0,
+            "dice_wins": 0,
+            "rps_wins": 0,
+        }
+    return user_game_stats[user_id]
+
+
+def get_user_rank(score: int) -> str:
+    if score >= 500:
+        return "👑 Грандмастер AI"
+    elif score >= 250:
+        return "🔮 Архимаг Разума"
+    elif score >= 100:
+        return "⚡ Опытный Игрок"
+    elif score >= 30:
+        return "🌱 Любознательный"
+    return "🥉 Новичок"
+
+
 # --- Инициализация Gemini ---
 config.validate_config()
 genai.configure(api_key=config.GEMINI_API_KEY)
 
-# Режимы общения (Personas) с аккуратными инструкциями
+# Режимы общения (Personas)
 MODES = {
     "standard": {
         "title": "🤖 Стандартный",
@@ -203,15 +236,14 @@ def get_or_create_chat(user_id: int) -> genai.ChatSession:
             model_name=config.GEMINI_MODEL,
             system_instruction=system_instruction,
             generation_config=genai.types.GenerationConfig(
-                temperature=0.35,  # Оптимизированный сэмплинг для максимально быстрого старта генерации
+                temperature=0.35,
                 top_p=0.9,
                 top_k=30,
-                max_output_tokens=2048,  # Лимит токенов для исключения затянутых ответов
+                max_output_tokens=2048,
             ),
         )
         user_chats[user_id] = model.start_chat(history=[])
     else:
-        # Автоматическая оптимизация истории диалога: держим последние 12 реплик для мгновенного ответа
         chat = user_chats[user_id]
         if len(chat.history) > 16:
             chat.history = chat.history[-12:]
@@ -237,8 +269,9 @@ async def setup_bot_commands():
     """Регистрирует подсказки команд в Telegram интерфейсе при вводе '/'."""
     commands = [
         BotCommand(command="start", description="🚀 Главное меню и приветствие"),
+        BotCommand(command="games", description="🎮 Мини-игры и викторины с ИИ"),
         BotCommand(command="menu", description="🎭 Выбрать режим общения (персону)"),
-        BotCommand(command="image", description="🎨 Сгенерировать фото или арт"),
+        BotCommand(command="image", description="🎨 Создать картинку (Turbo 1024x1024)"),
         BotCommand(command="reset", description="🧹 Очистить память диалога"),
         BotCommand(command="ping", description="🏓 Проверить статус моделей и сервера"),
         BotCommand(command="help", description="📖 Справка и возможности"),
@@ -260,10 +293,11 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
             KeyboardButton(text="🎨 Нарисовать арт"),
         ],
         [
+            KeyboardButton(text="🎮 Мини-игры"),
             KeyboardButton(text="🎭 Сменить режим"),
-            KeyboardButton(text="📊 Статус / Пинг"),
         ],
         [
+            KeyboardButton(text="📊 Статус / Пинг"),
             KeyboardButton(text="❓ Помощь"),
         ],
     ]
@@ -282,7 +316,10 @@ def get_admin_reply_keyboard() -> ReplyKeyboardMarkup:
             KeyboardButton(text="⚠️ Ошибки"),
         ],
         [
+            KeyboardButton(text="🎮 Мини-игры"),
             KeyboardButton(text="📊 Статус / Пинг"),
+        ],
+        [
             KeyboardButton(text="🔙 Обычное меню"),
         ],
     ]
@@ -318,6 +355,77 @@ def get_image_styles_inline_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def get_games_inline_keyboard(user_score: int = 0) -> InlineKeyboardMarkup:
+    """Главное лобби мини-игр."""
+    kb = [
+        [
+            InlineKeyboardButton(text="🧠 AI-Викторина (Квиз)", callback_query_data="game:quiz:menu"),
+            InlineKeyboardButton(text="🕵️ Текстовый AI-Квест", callback_query_data="game:quest:menu"),
+        ],
+        [
+            InlineKeyboardButton(text="🎲 Бросок кубика (Dice)", callback_query_data="game:dice:play"),
+            InlineKeyboardButton(text="✂️ Камень-Ножницы-Бумага", callback_query_data="game:rps:menu"),
+        ],
+        [
+            InlineKeyboardButton(text="🔮 Магический Оракул", callback_query_data="game:oracle:ask"),
+            InlineKeyboardButton(text="🏆 Мой профиль и очки", callback_query_data="game:profile"),
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Закрыть меню", callback_query_data="close_menu"),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_quiz_categories_keyboard() -> InlineKeyboardMarkup:
+    kb = [
+        [
+            InlineKeyboardButton(text="💻 IT и Технологии", callback_query_data="game:quiz:cat:it"),
+            InlineKeyboardButton(text="🚀 Космос и Наука", callback_query_data="game:quiz:cat:science"),
+        ],
+        [
+            InlineKeyboardButton(text="🎬 Кино и Поп-культура", callback_query_data="game:quiz:cat:cinema"),
+            InlineKeyboardButton(text="🎲 Случайная тема", callback_query_data="game:quiz:cat:random"),
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад в игры", callback_query_data="game:lobby"),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_quest_genres_keyboard() -> InlineKeyboardMarkup:
+    kb = [
+        [
+            InlineKeyboardButton(text="🏙️ Киберпанк: Побег", callback_query_data="game:quest:start:cyberpunk"),
+        ],
+        [
+            InlineKeyboardButton(text="🏰 Темное Фэнтези: Подземелье", callback_query_data="game:quest:start:fantasy"),
+        ],
+        [
+            InlineKeyboardButton(text="🔍 Нуарный Детектив: Тайна", callback_query_data="game:quest:start:detective"),
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад в игры", callback_query_data="game:lobby"),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def get_rps_keyboard() -> InlineKeyboardMarkup:
+    kb = [
+        [
+            InlineKeyboardButton(text="🪨 Камень", callback_query_data="game:rps:play:rock"),
+            InlineKeyboardButton(text="✂️ Ножницы", callback_query_data="game:rps:play:scissors"),
+            InlineKeyboardButton(text="📄 Бумага", callback_query_data="game:rps:play:paper"),
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад в игры", callback_query_data="game:lobby"),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
 def get_admin_inline_keyboard() -> InlineKeyboardMarkup:
     web_url = f"{config.RENDER_EXTERNAL_URL}/admin?key={config.ADMIN_SECRET}" if config.RENDER_EXTERNAL_URL else "#"
     kb = [
@@ -340,6 +448,154 @@ def get_admin_inline_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
+# --- Генераторы игрового контента через Gemini ---
+
+async def generate_trivia_question(category: str = "random") -> dict:
+    cat_names = {
+        "it": "IT, программирование, компьютеры и интернет",
+        "science": "наука, космос, физика и биология",
+        "cinema": "кино, игры, музыка и поп-культура",
+        "random": "любая неожиданная и интересная тема",
+    }
+    theme = cat_names.get(category, "любая тема")
+    prompt = (
+        f"Сгенерируй один интересный, не слишком банальный вопрос викторины на тему: {theme}.\n"
+        "Ответь строго в формате валидного JSON без разметки markdown:\n"
+        "{\n"
+        '  "question": "Текст вопроса",\n'
+        '  "options": ["Вариант 1", "Вариант 2", "Вариант 3", "Вариант 4"],\n'
+        '  "correct": 0,\n'
+        '  "fact": "Краткий познавательный факт о правильном ответе (1-2 предложения)"\n'
+        "}\n"
+        "Где correct — это индекс правильного ответа (от 0 до 3)."
+    )
+    try:
+        loop = asyncio.get_running_loop()
+        resp = await loop.run_in_executor(
+            None,
+            lambda: genai.GenerativeModel(config.GEMINI_MODEL).generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(temperature=0.7, max_output_tokens=300)
+            )
+        )
+        text = resp.text.strip()
+        if "```" in text:
+            parts = text.split("```")
+            text = parts[1]
+            if text.startswith("json"):
+                text = text[4:]
+        data = json.loads(text.strip())
+        if "question" in data and "options" in data and len(data["options"]) == 4 and "correct" in data:
+            return data
+    except Exception as e:
+        logger.warning(f"Ошибка парсинга квиза: {e}")
+
+    return {
+        "question": "Какой язык программирования был назван в честь британской комедийной группы Monty Python?",
+        "options": ["Python", "Java", "Ruby", "Pascal"],
+        "correct": 0,
+        "fact": "Гвидо ван Россум назвал Python не в честь змеи, а в честь телешоу «Летающий цирк Монти Пайтона»!"
+    }
+
+
+async def generate_quest_step(genre: str, history: list, choice: str = "") -> dict:
+    genre_names = {
+        "cyberpunk": "Киберпанк: неоновый мегаполис, хакеры, андроиды и корпорации",
+        "fantasy": "Темное фэнтези: подземелья, древние руны, драконы и магия",
+        "detective": "Нуарный детектив: таинственное преступление, дождь и улики",
+    }
+    theme = genre_names.get(genre, "Приключение")
+    step_num = len(history) + 1
+
+    if step_num == 1:
+        prompt = (
+            f"Ты — гейммастер текстового квеста в жанре {theme}.\n"
+            "Напиши начало захватывающей интерактивной истории (2-3 предложения) и предложи 3 коротких варианта действий для игрока.\n"
+            "Формат JSON строго:\n"
+            "{\n"
+            '  "scene": "Описание стартовой ситуации...",\n'
+            '  "options": ["Действие 1", "Действие 2", "Действие 3"],\n'
+            '  "is_end": false\n'
+            "}"
+        )
+    elif step_num >= 4:
+        prompt = (
+            f"Жанр: {theme}. Предыдущий ход игрока: '{choice}'.\n"
+            f"История: {' -> '.join(history)}\n"
+            "Напиши яркую и запоминающуюся кульминацию/развязку квеста (победа или финал истории) за 3 предложения.\n"
+            "Формат JSON строго:\n"
+            "{\n"
+            '  "scene": "Финал истории...",\n'
+            '  "options": ["🎉 Завершить квест"],\n'
+            '  "is_end": true\n'
+            "}"
+        )
+    else:
+        prompt = (
+            f"Жанр: {theme}. Игрок выбрал: '{choice}'.\n"
+            f"История: {' -> '.join(history)}\n"
+            "Опиши последствия этого выбора (2-3 предложения) и предложи следующие 2 или 3 коротких варианта действий.\n"
+            "Формат JSON строго:\n"
+            "{\n"
+            '  "scene": "Что произошло дальше...",\n'
+            '  "options": ["Вариант 1", "Вариант 2", "Вариант 3"],\n'
+            '  "is_end": false\n'
+            "}"
+        )
+
+    try:
+        loop = asyncio.get_running_loop()
+        resp = await loop.run_in_executor(
+            None,
+            lambda: genai.GenerativeModel(config.GEMINI_MODEL).generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(temperature=0.75, max_output_tokens=350)
+            )
+        )
+        text = resp.text.strip()
+        if "```" in text:
+            parts = text.split("```")
+            text = parts[1]
+            if text.startswith("json"):
+                text = text[4:]
+        data = json.loads(text.strip())
+        if "scene" in data and "options" in data:
+            return data
+    except Exception as e:
+        logger.warning(f"Ошибка генерации квеста: {e}")
+
+    return {
+        "scene": f"Вы делаете решительный шаг вперед в мире {theme}. Впереди загорается яркий свет.",
+        "options": ["Пойти на свет", "Осмотреться", "Приготовить оружие"],
+        "is_end": False
+    }
+
+
+async def get_oracle_prediction(user_question: str = "") -> str:
+    prompt = (
+        "Ты — мудрый и остроумный Магический Оракул.\n"
+        f"Пользователь обратился за предсказанием или советом: '{user_question or 'Что меня ждет сегодня?'}'.\n"
+        "Дай вдохновляющее, оригинальное и позитивное предсказание на 2-3 предложения. Используй эмодзи 🔮✨."
+    )
+    try:
+        loop = asyncio.get_running_loop()
+        resp = await loop.run_in_executor(
+            None,
+            lambda: genai.GenerativeModel(config.GEMINI_MODEL).generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(temperature=0.85, max_output_tokens=150)
+            )
+        )
+        return resp.text.strip()
+    except Exception:
+        answers = [
+            "🔮 Звезды говорят: самое смелое решение на этой неделе принесет невероятный успех. Действуй!",
+            "🔮 Магический туман рассеивается: ответ определенно ДА! Главное — сохраняй уверенность.",
+            "🔮 Интуиция подскажет верный путь уже сегодня. Сделай паузу на кофе и доверься себе!",
+        ]
+        return random.choice(answers)
+
+
 # --- Форматирование ленты пользовательских логов для админа ---
 
 def format_user_activity_feed(records: list) -> str:
@@ -356,6 +612,8 @@ def format_user_activity_feed(records: list) -> str:
             icon = "🎥"
         elif "АРТ" in ev:
             icon = "🎨"
+        elif "ИГРА" in ev:
+            icon = "🎮"
         elif "ГОЛОС" in ev:
             icon = "🎤"
         elif "ДОКУМЕНТ" in ev:
@@ -388,7 +646,6 @@ MODELS_PROBE = [
 
 
 async def probe_gemini_models() -> str:
-    """Тестирует отклик и работоспособность различных моделей Google Gemini."""
     lines = []
     loop = asyncio.get_running_loop()
 
@@ -448,8 +705,6 @@ async def safe_send_message(chat_id: int, text: str, reply_markup=None):
 # --- Высокоскоростная генерация изображений (Turbo) ---
 
 async def enhance_image_prompt(user_prompt: str) -> str:
-    """Молниеносная подготовка промпта: если текст уже на латинице — 0мс задержки."""
-    # Если в промпте нет кириллицы, сразу используем оригинал (мгновенно!)
     if not re.search(r'[а-яА-ЯёЁ]', user_prompt):
         return user_prompt.strip()
 
@@ -475,11 +730,9 @@ async def enhance_image_prompt(user_prompt: str) -> str:
 
 
 async def fetch_image(prompt: str) -> bytes | None:
-    """Скачивает изображение через скоростной движок Turbo (генерация за 1-2 секунды вместо 15с)."""
     encoded_prompt = urllib.parse.quote(prompt)
     seed = random.randint(1, 99999999)
 
-    # Высокоскоростные Turbo-эндпоинты с мгновенной отрисовкой
     endpoints = [
         f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&seed={seed}&model=turbo",
         f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=800&height=800&nologo=true&seed={seed}&model=turbo",
@@ -506,10 +759,9 @@ async def fetch_image(prompt: str) -> bytes | None:
 
 
 async def handle_generate_image(message: types.Message, prompt: str):
-    """Генерирует и отправляет реальное фото прямо в чат — без ссылок и лишнего текста."""
     if not prompt:
         text = (
-            "🎨 *Генерация изображений (1024×1024)*\n\n"
+            "🎨 *Генерация изображений (1024×1024 Turbo)*\n\n"
             "Напишите команду с описанием:\n"
             "`/image уютный домик в заснеженном лесу`\n\n"
             "Или просто отправьте сообщение:\n"
@@ -523,7 +775,6 @@ async def handle_generate_image(message: types.Message, prompt: str):
         )
         return
 
-    # Показываем статус "отправляет фото..."
     await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_PHOTO)
     status_msg = await bot.send_message(
         chat_id=message.chat.id,
@@ -544,7 +795,6 @@ async def handle_generate_image(message: types.Message, prompt: str):
                 status="OK"
             )
 
-            # Чистая подпись без ссылок и технических подробностей
             clean_caption = f"🎨 *{prompt}*"
             photo_file = BufferedInputFile(image_bytes, filename="image.jpg")
 
@@ -562,7 +812,6 @@ async def handle_generate_image(message: types.Message, prompt: str):
                     caption=f"🎨 {prompt}"
                 )
 
-            # Удаляем статусное сообщение
             try:
                 await bot.delete_message(chat_id=message.chat.id, message_id=status_msg.message_id)
             except Exception:
@@ -590,7 +839,6 @@ async def handle_generate_image(message: types.Message, prompt: str):
 
 
 def extract_image_prompt(text: str) -> str | None:
-    """Умное распознавание намерения пользователя создать изображение."""
     t = text.strip()
     low = t.lower()
 
@@ -635,11 +883,39 @@ async def cmd_start(message: types.Message):
         "💡 *Чем могу помочь:*\n"
         "• 💬 Найти ответ на любой вопрос и объяснить сложные вещи\n"
         "• 🎨 Сгенерировать фото или арт в высоком разрешении\n"
+        "• 🎮 Сыграть в интерактивные мини-игры (квизы, квесты)\n"
         "• 📸 Распознать и проанализировать присланную фотографию\n"
         "• 💻 Написать, разобрать или исправить программный код\n\n"
         "Выберите действие в меню внизу или просто напишите мне сообщение! 👇"
     )
     await safe_send_message(message.chat.id, welcome_text, reply_markup=active_kb)
+
+
+@dp.message(Command("games", "game"))
+@dp.message(F.text == "🎮 Мини-игры")
+async def cmd_games(message: types.Message):
+    """Игровой центр с мини-играми."""
+    log_mgr.add_user_activity(message.from_user, "ИГРА", "Открыл игровое меню")
+    stats = get_user_stats(message.from_user.id)
+    rank = get_user_rank(stats["score"])
+
+    text = (
+        "🎮 *Игровой Центр Gemini*\n\n"
+        "Добро пожаловать в игровую зону! Проверьте свою эрудицию, испытайте удачу или погрузитесь в интерактивный сюжет:\n\n"
+        "• 🧠 *AI-Викторина* — интеллектуальный квиз на разные темы\n"
+        "• 🕵️ *Текстовый AI-Квест* — RPG-приключение с генерацией сюжета на лету\n"
+        "• 🎲 *Кости против бота* — бросок кубиков на победу\n"
+        "• ✂️ *Камень-Ножницы-Бумага* — классическая битва с ИИ\n"
+        "• 🔮 *Магический Оракул* — персональные предсказания и советы\n"
+        "• 🏆 *Профиль игрока* — ваши очки опыта, статистика и ранг\n\n"
+        f"🎖 *Ваш ранг:* {rank} (`{stats['score']} XP`)"
+    )
+    await bot.send_message(
+        chat_id=message.chat.id,
+        text=text,
+        reply_markup=get_games_inline_keyboard(stats["score"]),
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 
 @dp.message(Command("menu"))
@@ -694,11 +970,12 @@ async def cmd_help(message: types.Message):
     help_text = (
         "📖 *Как пользоваться ботом:*\n\n"
         "1. *Вопросы и поиск:* Просто отправляйте текстовые сообщения.\n"
-        "2. *Генерация картинок:* Напишите команду `/image <описание>` или фразу «*Нарисуй кота в космосе*» — бот сразу пришлет готовое изображение.\n"
-        "3. *Анализ фото:* Пришлите любую фотографию с вопросом — бот распознает объекты и даст ответ.\n"
-        "4. *Смена стиля ответов:* Кнопка «🎭 Сменить режим» позволяет переключаться между Программистом, Писателем, Репетитором и др.\n"
-        "5. *Очистка памяти:* Кнопка «💬 Новый диалог» сбрасывает контекст текущей темы.\n"
-        "6. *Команды:* Наберите `/` в поле ввода, чтобы увидеть список подсказок."
+        "2. *Генерация картинок:* Напишите команду `/image <описание>` или фразу «*Нарисуй спорткар*» — бот пришлет готовое фото за пару секунд.\n"
+        "3. *Мини-игры:* Нажмите «🎮 Мини-игры» или введите `/games` (викторины, квесты, кости).\n"
+        "4. *Анализ фото:* Пришлите любую фотографию с вопросом — бот распознает изображение.\n"
+        "5. *Смена стиля ответов:* Кнопка «🎭 Сменить режим» переключает персоны (Кодер, Писатель, Репетитор).\n"
+        "6. *Очистка памяти:* Кнопка «💬 Новый диалог» сбрасывает контекст беседы.\n"
+        "7. *Команды:* Наберите `/` в поле ввода для вызова списка команд."
     )
     await safe_send_message(message.chat.id, help_text, reply_markup=active_kb)
 
@@ -706,7 +983,6 @@ async def cmd_help(message: types.Message):
 @dp.message(Command("ping"))
 @dp.message(F.text == "📊 Статус / Пинг")
 async def cmd_ping(message: types.Message):
-    """Проверка доступности сервера и задержки моделей Gemini."""
     log_mgr.add_user_activity(message.from_user, "СТАТУС", "Запросил /ping и проверку моделей")
     await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
 
@@ -729,8 +1005,8 @@ async def cmd_ping(message: types.Message):
         f"• *Статус:* Активен 🟢\n"
         f"• *Непрерывный аптайм:* `{uptime_str}`\n"
         f"• *Ваш режим:* {MODES[cur_mode]['title']}\n"
-        f"• *Сообщений:* {log_mgr.total_messages} | *Артов Flux:* {log_mgr.total_images}\n"
-        f"• *Пользователей:* {len(log_mgr.unique_users)}\n\n"
+        f"• *Сообщений:* {log_mgr.total_messages} | *Артов Turbo:* {log_mgr.total_images}\n"
+        f"• *Сыграно игр:* {log_mgr.total_games} | *Пользователей:* {len(log_mgr.unique_users)}\n\n"
         "🤖 *Работоспособность сетей Gemini:*\n"
         f"{models_report}"
     )
@@ -781,7 +1057,7 @@ async def cmd_admin(message: types.Message):
     header_text = (
         f"👑 *Панель управления администратора*\n"
         f"• *Аптайм:* {hours}ч {minutes}м {seconds}с | *Пользователей:* {len(log_mgr.unique_users)}\n"
-        f"• *Сообщений:* {log_mgr.total_messages} | *Картинок:* {log_mgr.total_images} | *Фото:* {log_mgr.total_photos}\n\n"
+        f"• *Сообщений:* {log_mgr.total_messages} | *Картинок:* {log_mgr.total_images} | *Игр:* {log_mgr.total_games}\n\n"
         "✨ _Вам включена нижняя клавиатура администратора._\n\n"
     )
 
@@ -842,7 +1118,7 @@ async def admin_btn_switch_menu(message: types.Message):
     )
 
 
-# --- Обработчик Инлайн-кнопок (Callback Queries) ---
+# --- Обработчик Инлайн-кнопок (Игры, Режимы, Админка) ---
 
 @dp.callback_query()
 async def handle_callbacks(callback: CallbackQuery):
@@ -850,7 +1126,302 @@ async def handle_callbacks(callback: CallbackQuery):
     user_id = callback.from_user.id
     user = callback.from_user
 
-    # 1. Смена режима
+    # === РАЗДЕЛ МИНИ-ИГР ===
+
+    # Главное лобби игр
+    if data == "game:lobby":
+        stats = get_user_stats(user_id)
+        rank = get_user_rank(stats["score"])
+        text = (
+            "🎮 *Игровой Центр Gemini*\n\n"
+            "Выберите мини-игру для запуска:\n\n"
+            "• 🧠 *AI-Викторина* — квиз на эрудицию\n"
+            "• 🕵️ *Текстовый AI-Квест* — интерактивная RPG-история\n"
+            "• 🎲 *Кости против бота* — бросок кубиков на победу\n"
+            "• ✂️ *Камень-Ножницы-Бумага* — классическая дуэль с ИИ\n"
+            "• 🔮 *Магический Оракул* — персональные предсказания\n\n"
+            f"🎖 *Ваш ранг:* {rank} (`{stats['score']} XP`)"
+        )
+        await callback.answer()
+        try:
+            await callback.message.edit_text(text, reply_markup=get_games_inline_keyboard(stats["score"]), parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            await callback.message.answer(text, reply_markup=get_games_inline_keyboard(stats["score"]), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # 1. Викторина (Квиз)
+    if data == "game:quiz:menu":
+        await callback.answer()
+        text = "🧠 *AI-Викторина*\n\nВыберите тему вопроса:"
+        await callback.message.edit_text(text, reply_markup=get_quiz_categories_keyboard(), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if data.startswith("game:quiz:cat:"):
+        category = data.split(":")[3]
+        await callback.answer("Генерирую вопрос...")
+        await callback.message.edit_text("⏳ *Gemini придумывает вопрос...*")
+
+        q_data = await generate_trivia_question(category)
+        user_active_games[user_id] = {"type": "quiz", "data": q_data, "category": category}
+
+        opts = q_data["options"]
+        kb = [
+            [
+                InlineKeyboardButton(text=f"A) {opts[0]}", callback_query_data="game:quiz:ans:0"),
+                InlineKeyboardButton(text=f"B) {opts[1]}", callback_query_data="game:quiz:ans:1"),
+            ],
+            [
+                InlineKeyboardButton(text=f"C) {opts[2]}", callback_query_data="game:quiz:ans:2"),
+                InlineKeyboardButton(text=f"D) {opts[3]}", callback_query_data="game:quiz:ans:3"),
+            ],
+            [
+                InlineKeyboardButton(text="🔙 В лобби игр", callback_query_data="game:lobby"),
+            ]
+        ]
+        q_text = f"🧠 *Вопрос викторины:*\n\n*{q_data['question']}*\n\nВыберите один из вариантов ниже:"
+        await callback.message.edit_text(q_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if data.startswith("game:quiz:ans:"):
+        chosen_idx = int(data.split(":")[3])
+        active = user_active_games.get(user_id)
+        if not active or active.get("type") != "quiz":
+            await callback.answer("Сессия вопроса устарела.", show_alert=True)
+            return
+
+        q_data = active["data"]
+        cat = active.get("category", "random")
+        correct_idx = q_data["correct"]
+        stats = get_user_stats(user_id)
+        stats["trivia_total"] += 1
+        log_mgr.total_games += 1
+
+        is_correct = (chosen_idx == correct_idx)
+        if is_correct:
+            stats["trivia_correct"] += 1
+            stats["score"] += 15
+            log_mgr.add_user_activity(user, "ИГРА", "Викторина: верный ответ (+15 XP)")
+            ans_header = "🎉 *Правильно! Вы ответили верно!* (+15 XP)"
+        else:
+            log_mgr.add_user_activity(user, "ИГРА", f"Викторина: неверный ответ (выбрал {q_data['options'][chosen_idx]})")
+            ans_header = f"❌ *Неверно!* Правильный ответ: *{q_data['options'][correct_idx]}*"
+
+        res_text = (
+            f"{ans_header}\n\n"
+            f"❓ *Вопрос:* {q_data['question']}\n\n"
+            f"💡 *Факт:* {q_data['fact']}\n\n"
+            f"🏆 Ваш счёт: *{stats['score']} XP* ({get_user_rank(stats['score'])})"
+        )
+
+        kb = [
+            [InlineKeyboardButton(text="➡️ Следующий вопрос", callback_query_data=f"game:quiz:cat:{cat}")],
+            [InlineKeyboardButton(text="🔙 В меню игр", callback_query_data="game:lobby")],
+        ]
+        await callback.answer("Ответ принят!")
+        await callback.message.edit_text(res_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # 2. Текстовый Квест (AI Quest)
+    if data == "game:quest:menu":
+        await callback.answer()
+        text = "🕵️ *Интерактивный AI-Квест*\n\nВыберите сеттинг истории:"
+        await callback.message.edit_text(text, reply_markup=get_quest_genres_keyboard(), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if data.startswith("game:quest:start:"):
+        genre = data.split(":")[3]
+        await callback.answer("Создаю мир квеста...")
+        await callback.message.edit_text("⏳ *Генерирую стартовую сцену...*")
+
+        step_data = await generate_quest_step(genre, history=[])
+        user_active_games[user_id] = {
+            "type": "quest",
+            "genre": genre,
+            "history": [],
+            "last_options": step_data["options"],
+        }
+
+        kb_rows = []
+        for idx, opt in enumerate(step_data["options"][:3]):
+            kb_rows.append([InlineKeyboardButton(text=f"👉 {opt[:38]}", callback_query_data=f"game:quest:step:{idx}")])
+        kb_rows.append([InlineKeyboardButton(text="🔙 Выйти из квеста", callback_query_data="game:lobby")])
+
+        scene_text = f"📖 *Глава 1: Начало пути*\n\n{step_data['scene']}\n\n*Что вы сделаете?*"
+        await callback.message.edit_text(scene_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if data.startswith("game:quest:step:"):
+        choice_idx = int(data.split(":")[3])
+        active = user_active_games.get(user_id)
+        if not active or active.get("type") != "quest":
+            await callback.answer("Сессия квеста завершена.", show_alert=True)
+            return
+
+        last_opts = active.get("last_options", [])
+        chosen_text = last_opts[choice_idx] if choice_idx < len(last_opts) else "Действовать"
+        active["history"].append(chosen_text)
+
+        await callback.answer("Сюжет развивается...")
+        await callback.message.edit_text("⏳ *История пишется на ваших глазах...*")
+
+        step_data = await generate_quest_step(active["genre"], active["history"], chosen_text)
+        active["last_options"] = step_data["options"]
+        chapter_num = len(active["history"]) + 1
+
+        if step_data.get("is_end", False):
+            stats = get_user_stats(user_id)
+            stats["quest_completed"] += 1
+            stats["score"] += 35
+            log_mgr.total_games += 1
+            log_mgr.add_user_activity(user, "ИГРА", f"Квест пройден успешно (+35 XP)")
+
+            fin_text = (
+                f"🏆 *Квест завершен!* (+35 XP)\n\n"
+                f"{step_data['scene']}\n\n"
+                f"🎖 Ваш счёт: *{stats['score']} XP* ({get_user_rank(stats['score'])})"
+            )
+            kb = [
+                [InlineKeyboardButton(text="🔄 Сыграть снова", callback_query_data="game:quest:menu")],
+                [InlineKeyboardButton(text="🔙 В меню игр", callback_query_data="game:lobby")],
+            ]
+            await callback.message.edit_text(fin_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode=ParseMode.MARKDOWN)
+            return
+
+        kb_rows = []
+        for idx, opt in enumerate(step_data["options"][:3]):
+            kb_rows.append([InlineKeyboardButton(text=f"👉 {opt[:38]}", callback_query_data=f"game:quest:step:{idx}")])
+        kb_rows.append([InlineKeyboardButton(text="🔙 Прервать квест", callback_query_data="game:lobby")])
+
+        scene_text = f"📖 *Глава {chapter_num}*\n\n{step_data['scene']}\n\n*Ваше следующее действие:*"
+        await callback.message.edit_text(scene_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # 3. Игра в Кости (Dice)
+    if data == "game:dice:play":
+        await callback.answer("Бросаем кости!")
+        chat_id = callback.message.chat.id
+        stats = get_user_stats(user_id)
+        log_mgr.total_games += 1
+
+        await bot.send_message(chat_id, "🎲 *Ваш бросок:*", parse_mode=ParseMode.MARKDOWN)
+        user_dice = await bot.send_dice(chat_id=chat_id, emoji="🎲")
+        await asyncio.sleep(2.5)
+
+        await bot.send_message(chat_id, "🤖 *Бросок Gemini:*", parse_mode=ParseMode.MARKDOWN)
+        bot_dice = await bot.send_dice(chat_id=chat_id, emoji="🎲")
+        await asyncio.sleep(2.5)
+
+        u_val = user_dice.dice.value
+        b_val = bot_dice.dice.value
+
+        if u_val > b_val:
+            stats["dice_wins"] += 1
+            stats["score"] += 10
+            log_mgr.add_user_activity(user, "ИГРА", f"Кости: победа {u_val}:{b_val} (+10 XP)")
+            outcome = f"🎉 *Вы победили!* ({u_val} против {b_val}) +10 XP"
+        elif u_val < b_val:
+            log_mgr.add_user_activity(user, "ИГРА", f"Кости: поражение {u_val}:{b_val}")
+            outcome = f"🤖 *Бот победил!* ({b_val} против {u_val}) Попробуйте отыграться!"
+        else:
+            stats["score"] += 5
+            log_mgr.add_user_activity(user, "ИГРА", f"Кости: ничья {u_val}:{b_val} (+5 XP)")
+            outcome = f"🤝 *Ничья!* ({u_val}:{b_val}) Дружеский раунд! +5 XP"
+
+        kb = [
+            [InlineKeyboardButton(text="🎲 Бросить еще раз", callback_query_data="game:dice:play")],
+            [InlineKeyboardButton(text="🔙 В меню игр", callback_query_data="game:lobby")],
+        ]
+        await bot.send_message(chat_id, f"{outcome}\n\nСчёт: *{stats['score']} XP*", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # 4. Камень, Ножницы, Бумага
+    if data == "game:rps:menu":
+        await callback.answer()
+        text = "✂️ *Камень, Ножницы, Бумага*\n\nСделайте ваш ход:"
+        await callback.message.edit_text(text, reply_markup=get_rps_keyboard(), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if data.startswith("game:rps:play:"):
+        user_choice = data.split(":")[3]
+        choices = ["rock", "scissors", "paper"]
+        names = {"rock": "🪨 Камень", "scissors": "✂️ Ножницы", "paper": "📄 Бумага"}
+        bot_choice = random.choice(choices)
+        stats = get_user_stats(user_id)
+        log_mgr.total_games += 1
+
+        if user_choice == bot_choice:
+            stats["score"] += 5
+            res_icon = "🤝 Ничья!"
+            bonus = "+5 XP"
+            log_mgr.add_user_activity(user, "ИГРА", "КНБ: ничья (+5 XP)")
+        elif (user_choice == "rock" and bot_choice == "scissors") or \
+             (user_choice == "scissors" and bot_choice == "paper") or \
+             (user_choice == "paper" and bot_choice == "rock"):
+            stats["rps_wins"] += 1
+            stats["score"] += 10
+            res_icon = "🎉 Победа игрока!"
+            bonus = "+10 XP"
+            log_mgr.add_user_activity(user, "ИГРА", "КНБ: победа (+10 XP)")
+        else:
+            res_icon = "🤖 Победа бота!"
+            bonus = "+0 XP"
+            log_mgr.add_user_activity(user, "ИГРА", "КНБ: поражение")
+
+        text = (
+            f"*{res_icon}* ({bonus})\n\n"
+            f"👤 Ваш выбор: {names[user_choice]}\n"
+            f"🤖 Выбор Gemini: {names[bot_choice]}\n\n"
+            f"🏆 Ваш счёт: *{stats['score']} XP* ({get_user_rank(stats['score'])})"
+        )
+        kb = [
+            [InlineKeyboardButton(text="🔄 Сыграть еще", callback_query_data="game:rps:menu")],
+            [InlineKeyboardButton(text="🔙 В меню игр", callback_query_data="game:lobby")],
+        ]
+        await callback.answer("Раунд завершен!")
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # 5. Магический Оракул
+    if data == "game:oracle:ask":
+        await callback.answer("Оракул смотрит в будущее...")
+        prediction = await get_oracle_prediction()
+        log_mgr.add_user_activity(user, "ИГРА", "Обратился к Оракулу")
+        stats = get_user_stats(user_id)
+        stats["score"] += 5
+
+        text = f"✨ *Предсказание Оракула:*\n\n_{prediction}_\n\n🔮 +5 XP за любознательность!"
+        kb = [
+            [InlineKeyboardButton(text="🔮 Спросить еще раз", callback_query_data="game:oracle:ask")],
+            [InlineKeyboardButton(text="🔙 В меню игр", callback_query_data="game:lobby")],
+        ]
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # 6. Профиль игрока
+    if data == "game:profile":
+        stats = get_user_stats(user_id)
+        rank = get_user_rank(stats["score"])
+        await callback.answer()
+
+        prof_text = (
+            f"🏆 *Профиль игрока: {user.first_name}*\n\n"
+            f"🎖 *Звание:* {rank}\n"
+            f"⚡ *Очки опыта:* `{stats['score']} XP`\n\n"
+            "📊 *Достижения в играх:*\n"
+            f"• 🧠 Квиз: {stats['trivia_correct']} верных из {stats['trivia_total']}\n"
+            f"• 🕵️ Квестов пройдено: {stats['quest_completed']}\n"
+            f"• 🎲 Побед в костях: {stats['dice_wins']}\n"
+            f"• ✂️ Побед в КНБ: {stats['rps_wins']}\n\n"
+            "_Играйте в игры, чтобы повышать свой ранг!_"
+        )
+        kb = [
+            [InlineKeyboardButton(text="🎮 Вернуться к играм", callback_query_data="game:lobby")],
+        ]
+        await callback.message.edit_text(prof_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # === РАЗДЕЛ РЕЖИМОВ И СТИЛЕЙ ===
+
     if data.startswith("set_mode:"):
         new_mode = data.split(":")[1]
         if new_mode in MODES:
@@ -873,7 +1444,6 @@ async def handle_callbacks(callback: CallbackQuery):
             )
         return
 
-    # 2. Выбор стиля арта
     if data.startswith("style:"):
         style_prompt = data.split(":", 1)[1]
         await callback.answer("Стиль выбран!")
@@ -884,7 +1454,6 @@ async def handle_callbacks(callback: CallbackQuery):
         )
         return
 
-    # 3. Закрытие меню
     if data == "close_menu":
         await callback.answer()
         try:
@@ -893,7 +1462,8 @@ async def handle_callbacks(callback: CallbackQuery):
             pass
         return
 
-    # 4. Админ-команды
+    # === РАЗДЕЛ АДМИНКИ ===
+
     if data.startswith("admin:"):
         if user_id not in authenticated_admins:
             await callback.answer("⛔ Доступ запрещен!", show_alert=True)
@@ -956,7 +1526,6 @@ async def handle_callbacks(callback: CallbackQuery):
 
 @dp.message(F.photo)
 async def handle_incoming_photo(message: types.Message):
-    """Прием и анализ фотографий с помощью Gemini Vision + подробное логирование."""
     user = message.from_user
     caption = message.caption or ""
     log_mgr.total_photos += 1
@@ -1061,7 +1630,6 @@ async def handle_message(message: types.Message):
         if not answer:
             answer = "Извините, не удалось сформировать ответ. Попробуйте перефразировать вопрос."
 
-        # Страховка от внешних ссылок генераторов в ответе
         log_mgr.total_messages += 1
         log_mgr.add_user_activity(
             user=user,
@@ -1100,7 +1668,7 @@ async def handle_http_root(request: web.Request) -> web.Response:
         text=(
             "Telegram Gemini Bot is running 24/7!\n"
             f"Uptime: {uptime_sec}s | Model: {config.GEMINI_MODEL}\n"
-            f"Processed: {log_mgr.total_messages} messages, {log_mgr.total_images} images\n"
+            f"Processed: {log_mgr.total_messages} messages, {log_mgr.total_images} images, {log_mgr.total_games} games\n"
         ),
         content_type="text/plain",
     )
@@ -1117,6 +1685,7 @@ async def handle_http_ping(request: web.Request) -> web.Response:
         "images_count": log_mgr.total_images,
         "photos_count": log_mgr.total_photos,
         "videos_count": log_mgr.total_videos,
+        "games_count": log_mgr.total_games,
         "pings_count": log_mgr.total_pings,
         "timestamp": datetime.utcnow().isoformat() + "Z",
     })
@@ -1234,16 +1803,16 @@ async def handle_web_admin(request: web.Request) -> web.Response:
             <div class="stat-val" style="color:#38bdf8;">{log_mgr.total_messages}</div>
         </div>
         <div class="stat-card">
-            <div class="stat-lbl">Артов Flux</div>
+            <div class="stat-lbl">Артов Turbo</div>
             <div class="stat-val" style="color:#a855f7;">{log_mgr.total_images}</div>
         </div>
         <div class="stat-card">
-            <div class="stat-lbl">Принято Фото</div>
-            <div class="stat-val" style="color:#10b981;">{log_mgr.total_photos}</div>
+            <div class="stat-lbl">Сыграно мини-игр</div>
+            <div class="stat-val" style="color:#10b981;">{log_mgr.total_games}</div>
         </div>
         <div class="stat-card">
-            <div class="stat-lbl">Принято Видео</div>
-            <div class="stat-val" style="color:#f59e0b;">{log_mgr.total_videos}</div>
+            <div class="stat-lbl">Принято Медиа</div>
+            <div class="stat-val" style="color:#f59e0b;">{log_mgr.total_photos + log_mgr.total_videos}</div>
         </div>
         <div class="stat-card">
             <div class="stat-lbl">Пользователей</div>
@@ -1253,7 +1822,7 @@ async def handle_web_admin(request: web.Request) -> web.Response:
 
     <div class="panel">
         <div class="panel-head">
-            <span style="font-weight:600;">📋 Лента активности пользователей (что искали, писали, присылали)</span>
+            <span style="font-weight:600;">📋 Лента активности пользователей (что искали, играли, присылали)</span>
             <span style="font-size:0.85rem; color:#94a3b8;">Модель: {config.GEMINI_MODEL}</span>
         </div>
         <table>
@@ -1262,7 +1831,7 @@ async def handle_web_admin(request: web.Request) -> web.Response:
                     <th>Время (UTC)</th>
                     <th>Действие</th>
                     <th>Пользователь</th>
-                    <th>Что искал / Запрос / Подпись фото</th>
+                    <th>Что искал / Игра / Запрос / Медиа</th>
                     <th>Статус</th>
                 </tr>
             </thead>
