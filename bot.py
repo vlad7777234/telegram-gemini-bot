@@ -3,6 +3,7 @@ import io
 import html
 import logging
 import random
+import re
 import sys
 import time
 import urllib.parse
@@ -40,10 +41,10 @@ logger = logging.getLogger("telegram_gemini_bot")
 START_TIME = time.time()
 
 
-# --- Расширенная система сбора пользовательских логов ---
+# --- Система сбора пользовательских логов ---
 
 class LogManager:
-    """Управляет записью всех действий пользователей: вопросов, поиска, фото, видео и артов."""
+    """Управляет записью всех действий пользователей."""
     def __init__(self, max_records=1000):
         self.logs = deque(maxlen=max_records)
         self.total_messages = 0
@@ -52,7 +53,7 @@ class LogManager:
         self.total_videos = 0
         self.total_pings = 0
         self.total_errors = 0
-        self.unique_users = {}  # user_id -> dict
+        self.unique_users = {}
 
     def track_user(self, user: types.User):
         if not user:
@@ -84,7 +85,7 @@ class LogManager:
         record = {
             "timestamp": now_str,
             "level": "INFO" if status == "OK" else "ERROR",
-            "event": event_type.upper(),  # ТЕКСТ, ПОИСК, ФОТО, ВИДЕО, АРТ, ГОЛОС, ДОКУМЕНТ
+            "event": event_type.upper(),
             "user_str": user_str,
             "user_id": user.id,
             "first_name": user.first_name or "",
@@ -101,7 +102,7 @@ class LogManager:
             "timestamp": now_str,
             "level": level.upper(),
             "event": event.upper(),
-            "user_str": "⚙️ Сервер (Автопинг)",
+            "user_str": "⚙️ Система (Автопинг)",
             "user_id": 0,
             "first_name": "Система",
             "username": "",
@@ -134,48 +135,51 @@ log_mgr = LogManager()
 config.validate_config()
 genai.configure(api_key=config.GEMINI_API_KEY)
 
-# Режимы общения (Personas)
+# Режимы общения (Personas) с аккуратными инструкциями
 MODES = {
     "standard": {
         "title": "🤖 Стандартный",
-        "description": "Универсальный помощник: баланс точности, дружелюбия и развернутых ответов.",
+        "description": "Универсальный умный помощник: баланс точности, ясности и полноты ответа.",
         "prompt": (
-            "Ты — умный, дружелюбный и экспертный AI-ассистент в Telegram на базе Google Gemini. "
-            "Отвечай структурированно, информативно и вежливо на языке запроса."
+            f"{config.SYSTEM_PROMPT}\n\n"
+            "Твой стиль: дружелюбный, экспертный, вежливый. Структурируй ответы списками и абзацами."
         ),
     },
     "coder": {
         "title": "💻 Программист (Senior Dev)",
-        "description": "Фокус на качественный код, архитектуру, алгоритмы и поиск багов.",
+        "description": "Фокус на чистый код, архитектуру, эффективные алгоритмы и поиск багов.",
         "prompt": (
-            "Ты — Senior Software Engineer и архитектор. "
-            "Пиши чистый, оптимизированный и безопасный код. Комментируй ключевые решения. "
-            "Оформляй код строго в блоки с указанием языка (```python, ```typescript и т.д.)."
+            f"{config.SYSTEM_PROMPT}\n\n"
+            "Твоя роль: Senior Software Engineer и техлид.\n"
+            "Пиши чистый, идиоматичный и безопасный код. Кратко объясняй логику и ключевые решения.\n"
+            "Весь код обязательно оформляй в блоки с указанием языка программирования."
         ),
     },
     "creative": {
         "title": "✍️ Писатель и Креатив",
-        "description": "Генерация идей, статей, постов для соцсетей, историй и сценариев.",
+        "description": "Создание текстов, увлекательных постов, сценариев, статей и креативных идей.",
         "prompt": (
-            "Ты — опытный писатель, копирайтер и креативный сценарист. "
-            "Пиши живо, увлекательно, используй метафоры, богатый словарный запас и вдохновляющий стиль."
+            f"{config.SYSTEM_PROMPT}\n\n"
+            "Твоя роль: профессиональный писатель и редактор.\n"
+            "Пиши выразительно, живо и увлекательно. Используй богатый язык, интересные метафоры и красивый ритм текста."
         ),
     },
     "concise": {
         "title": "⚡ Краткий и точный",
         "description": "Только суть, факты и списки, без вступительных фраз и воды.",
         "prompt": (
-            "Ты — ассистент с максимальной емкостью ответов. "
-            "Отвечай предельно сжато: только тезисы, формулы или списки. Никакой воды, приветствий и прощаний."
+            f"{config.SYSTEM_PROMPT}\n\n"
+            "Твоя роль: ассистент максимальной лаконичности.\n"
+            "Отвечай предельно емко: только пункты, выводы или код. Никаких приветствий, вводных слов и прощаний."
         ),
     },
     "tutor": {
         "title": "🎓 Репетитор (Объяснятор)",
-        "description": "Объясняет сложнейшие концепции простыми словами с наглядными аналогиями.",
+        "description": "Объясняет даже самые сложные концепции простыми словами с жизненными примерами.",
         "prompt": (
-            "Ты — лучший преподаватель. "
-            "Объясняй любые сложные научные или технические концепции просто (как для пятиклассника), "
-            "используй жизненные примеры и аналогии."
+            f"{config.SYSTEM_PROMPT}\n\n"
+            "Твоя роль: талантливый преподаватель.\n"
+            "Объясняй сложные темы наглядным и понятным языком, используй живые примеры и аналогии."
         ),
     },
 }
@@ -225,14 +229,14 @@ dp = Dispatcher()
 # --- Меню команд Telegram (подсказки при вводе "/") ---
 
 async def setup_bot_commands():
-    """Регистрирует команды бота в Telegram, чтобы при вводе '/' появлялись всплывающие подсказки."""
+    """Регистрирует подсказки команд в Telegram интерфейсе при вводе '/'."""
     commands = [
         BotCommand(command="start", description="🚀 Главное меню и приветствие"),
         BotCommand(command="menu", description="🎭 Выбрать режим общения (персону)"),
-        BotCommand(command="image", description="🎨 Создать картинку (Flux 1024x1024)"),
-        BotCommand(command="reset", description="🧹 Очистить контекст диалога"),
-        BotCommand(command="ping", description="🏓 Проверить статус сервера и моделей"),
-        BotCommand(command="help", description="📖 Подробная справка по боту"),
+        BotCommand(command="image", description="🎨 Сгенерировать фото или арт"),
+        BotCommand(command="reset", description="🧹 Очистить память диалога"),
+        BotCommand(command="ping", description="🏓 Проверить статус моделей и сервера"),
+        BotCommand(command="help", description="📖 Справка и возможности"),
     ]
     try:
         await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
@@ -244,7 +248,7 @@ async def setup_bot_commands():
 # --- Клавиатуры и Меню ---
 
 def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
-    """Главная нижняя клавиатура быстрого доступа для обычных пользователей."""
+    """Главная нижняя клавиатура быстрого доступа для пользователей."""
     kb = [
         [
             KeyboardButton(text="💬 Новый диалог"),
@@ -262,7 +266,7 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
 
 
 def get_admin_reply_keyboard() -> ReplyKeyboardMarkup:
-    """Нижняя панель управления администратора с быстрыми кнопками."""
+    """Нижняя панель управления для администратора."""
     kb = [
         [
             KeyboardButton(text="📋 Лента логов"),
@@ -292,12 +296,12 @@ def get_modes_inline_keyboard(current_mode: str) -> InlineKeyboardMarkup:
 
 def get_image_styles_inline_keyboard() -> InlineKeyboardMarkup:
     styles = [
-        ("📸 Фотореализм", "style:photorealistic portrait, 8k, cinematic lighting"),
-        ("🎌 Аниме / Манга", "style:anime masterpiece, makoto shinkai style, vibrant"),
-        ("🏙️ Киберпанк", "style:cyberpunk aesthetic, neon lights, futuristic city, octane render"),
-        ("🎨 Живопись маслом", "style:oil painting, visible brushstrokes, classic artistic masterpiece"),
-        ("🌌 Космос и Фэнтези", "style:epic fantasy, cosmic celestial landscape, magical atmosphere"),
-        ("🎮 3D Render", "style:unreal engine 5 render, isometric 3d, ray tracing, cute"),
+        ("📸 Фотореализм", "style:hyperrealistic photograph, 8k resolution, cinematic lighting, natural details"),
+        ("🎌 Аниме / Манга", "style:anime masterpiece, makoto shinkai style, vivid colors, detailed art"),
+        ("🏙️ Киберпанк", "style:cyberpunk aesthetic, neon city lights, rainy night, highly detailed"),
+        ("🎨 Живопись маслом", "style:classic oil painting, expressive brushstrokes, fine art masterpiece"),
+        ("🌌 Космос и Фэнтези", "style:epic fantasy, celestial cosmic landscape, glowing magical atmosphere"),
+        ("🎮 3D Render", "style:unreal engine 5 3d render, ray tracing, isometric cute stylized"),
     ]
     rows = []
     for i in range(0, len(styles), 2):
@@ -334,9 +338,8 @@ def get_admin_inline_keyboard() -> InlineKeyboardMarkup:
 # --- Форматирование ленты пользовательских логов для админа ---
 
 def format_user_activity_feed(records: list) -> str:
-    """Форматирует детальные логи запросов пользователей для вывода в Telegram."""
     if not records:
-        return "📭 _Журнал действий пока пуст. Как только пользователи напишут или отправят фото/видео — они появятся здесь._"
+        return "📭 _Журнал действий пока пуст. Запросы пользователей появятся здесь автоматически._"
 
     lines = ["📋 *Детальный журнал действий пользователей:*\n"]
     for r in records:
@@ -361,7 +364,7 @@ def format_user_activity_feed(records: list) -> str:
             f"{icon} *[{ev}]:* {r['content']}\n"
         )
         if r.get("bot_reply"):
-            entry += f"🤖 _Ответ бота:_ {r['bot_reply'][:120]}...\n"
+            entry += f"↳ _Ответ:_ {r['bot_reply'][:120]}...\n"
         entry += "─────────────────────────"
         lines.append(entry)
 
@@ -407,7 +410,7 @@ async def probe_gemini_models() -> str:
     return "\n".join(lines)
 
 
-# --- Утилиты сообщений ---
+# --- Утилиты отправки сообщений ---
 
 def split_text(text: str, max_chunk_size: int = 4000) -> list[str]:
     if len(text) <= max_chunk_size:
@@ -437,15 +440,17 @@ async def safe_send_message(chat_id: int, text: str, reply_markup=None):
             await bot.send_message(chat_id=chat_id, text=chunk, parse_mode=None, reply_markup=markup)
 
 
-# --- Генерация изображений ---
+# --- Генерация изображений (Чистое фото без ссылок) ---
 
 async def enhance_image_prompt(user_prompt: str) -> str:
+    """Улучшает промпт пользователя на английском для максимального качества генерации."""
     try:
         enhancer_instruction = (
-            "You are a master AI prompt engineer for high-resolution photo and art generation. "
-            "Convert the user's description into a vivid, visually rich, detailed prompt in English. "
-            "Include artistic style, lighting, depth, mood and composition details. "
-            "Output ONLY the prompt in English without conversational text, explanations, or quotes."
+            "You are an expert AI prompt engineer for high-resolution visual art. "
+            "Convert the user's description into a vivid, descriptive prompt in English. "
+            "Focus on visual subject, style, lighting, depth and mood. "
+            "DO NOT include links, markdown formatting, or explanations. "
+            "Output ONLY the prompt in English."
         )
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(
@@ -456,6 +461,8 @@ async def enhance_image_prompt(user_prompt: str) -> str:
         )
         enhanced = response.text.strip()
         if enhanced and len(enhanced) > 5:
+            # Убираем любые ссылки из промпта на всякий случай
+            enhanced = re.sub(r'https?://\S+', '', enhanced).strip()
             return enhanced
     except Exception as e:
         logger.warning(f"Не удалось улучшить промпт через Gemini: {e}")
@@ -463,31 +470,46 @@ async def enhance_image_prompt(user_prompt: str) -> str:
 
 
 async def fetch_image(prompt: str) -> bytes | None:
+    """Скачивает бинарные байты сгенерированного изображения без ссылок."""
     encoded_prompt = urllib.parse.quote(prompt)
     seed = random.randint(1, 99999999)
-    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&seed={seed}&model=flux"
 
-    timeout = ClientTimeout(total=50)
-    async with ClientSession(timeout=timeout) as session:
-        try:
-            async with session.get(url) as resp:
-                if resp.status == 200:
-                    return await resp.read()
-                logger.error(f"Image generation endpoint returned status {resp.status}")
-        except Exception as e:
-            logger.error(f"Image fetch failed: {e}")
+    # Список надежных эндпоинтов генерации
+    endpoints = [
+        f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&seed={seed}&model=flux",
+        f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&seed={seed}",
+    ]
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    timeout = ClientTimeout(total=45)
+
+    async with ClientSession(timeout=timeout, headers=headers) as session:
+        for url in endpoints:
+            try:
+                async with session.get(url, allow_redirects=True) as resp:
+                    if resp.status == 200:
+                        data = await resp.read()
+                        # Проверяем, что получено реальное изображение
+                        if len(data) > 3000 and (data[:3] == b'\xff\xd8\xff' or data[:4] == b'\x89PNG'):
+                            return data
+            except Exception as e:
+                logger.warning(f"Ошибка при запросе картинки: {e}")
+
     return None
 
 
 async def handle_generate_image(message: types.Message, prompt: str):
+    """Генерирует и отправляет реальное фото прямо в чат — без ссылок и лишнего текста."""
     if not prompt:
         text = (
-            "🎨 *Генератор изображений (1024x1024 Flux)*\n\n"
-            "Вы можете написать команду:\n"
-            "`/image киберпанк город под дождем`\n\n"
-            "Или просто сообщением:\n"
-            "«*Нарисуй кота в скафандре на Луне*»\n\n"
-            "Либо выберите один из готовых стилей ниже:"
+            "🎨 *Генерация изображений (1024×1024)*\n\n"
+            "Напишите команду с описанием:\n"
+            "`/image уютный домик в заснеженном лесу`\n\n"
+            "Или просто отправьте сообщение:\n"
+            "«*Нарисуй киберпанк спорткар на закате*»\n\n"
+            "Также можно выбрать готовый стиль ниже:"
         )
         await bot.send_message(
             chat_id=message.chat.id,
@@ -496,10 +518,11 @@ async def handle_generate_image(message: types.Message, prompt: str):
         )
         return
 
+    # Показываем статус "отправляет фото..."
     await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.UPLOAD_PHOTO)
     status_msg = await bot.send_message(
         chat_id=message.chat.id,
-        text="🎨 *Генерирую изображение...* Пожалуйста, подождите несколько секунд."
+        text="🎨 *Генерирую изображение...* Пожалуйста, подождите немного."
     )
 
     try:
@@ -512,30 +535,29 @@ async def handle_generate_image(message: types.Message, prompt: str):
                 user=message.from_user,
                 event_type="АРТ",
                 content=f"Промпт: «{prompt}»",
-                bot_reply=f"Сгенерировано изображение (детали: {enhanced_prompt[:80]}...)",
+                bot_reply="Сгенерировано изображение",
                 status="OK"
             )
 
-            caption = (
-                f"🎨 *Запрос:* {prompt}\n\n"
-                f"✨ *Детализация:* _{enhanced_prompt[:250]}..._\n"
-                f"🤖 _Сгенерировано: Gemini + Flux (1024x1024)_"
-            )
-            photo_file = BufferedInputFile(image_bytes, filename="artwork.jpg")
+            # Чистая подпись без ссылок и технических подробностей
+            clean_caption = f"🎨 *{prompt}*"
+            photo_file = BufferedInputFile(image_bytes, filename="image.jpg")
+
             try:
                 await bot.send_photo(
                     chat_id=message.chat.id,
                     photo=photo_file,
-                    caption=caption,
+                    caption=clean_caption,
                     parse_mode=ParseMode.MARKDOWN
                 )
-            except TelegramAPIError:
+            except Exception:
                 await bot.send_photo(
                     chat_id=message.chat.id,
                     photo=photo_file,
-                    caption=f"🎨 Запрос: {prompt}"
+                    caption=f"🎨 {prompt}"
                 )
 
+            # Удаляем статусное сообщение
             try:
                 await bot.delete_message(chat_id=message.chat.id, message_id=status_msg.message_id)
             except Exception:
@@ -549,7 +571,7 @@ async def handle_generate_image(message: types.Message, prompt: str):
                 bot_reply="Не удалось сгенерировать",
                 status="FAIL"
             )
-            await status_msg.edit_text("❌ Не удалось создать изображение. Попробуйте изменить описание.")
+            await status_msg.edit_text("❌ Не удалось сгенерировать изображение. Попробуйте сформулировать запрос иначе.")
     except Exception as e:
         log_mgr.total_errors += 1
         log_mgr.add_user_activity(
@@ -559,14 +581,40 @@ async def handle_generate_image(message: types.Message, prompt: str):
             status="ERROR"
         )
         logger.error(f"Ошибка при создании изображения: {e}", exc_info=True)
-        await status_msg.edit_text("⚠️ Произошла ошибка при генерации картинки. Попробуйте еще раз.")
+        await status_msg.edit_text("⚠️ Произошла ошибка при генерации изображения. Попробуйте еще раз.")
+
+
+def extract_image_prompt(text: str) -> str | None:
+    """Умное распознавание намерения пользователя создать изображение."""
+    t = text.strip()
+    low = t.lower()
+
+    triggers = [
+        "нарисуй мне ", "нарисуй, пожалуйста, ", "нарисуй, пожалуйста ", "нарисуй: ", "нарисуй ",
+        "сгенерируй картинку ", "сгенерируй фото ", "сгенерируй изображение ", "сгенерируй арт ", "сгенерируй ",
+        "создай картинку ", "создай фото ", "создай изображение ", "создай арт ", "создай рисунок ",
+        "сделай картинку ", "сделай фото ", "сделай изображение ", "сделай арт ",
+        "изобрази мне ", "изобрази ",
+        "картинка: ", "картинка ", "арт: ", "арт ",
+        "draw me ", "draw ", "generate image of ", "generate image ", "create art of ", "create art "
+    ]
+    for tr in triggers:
+        if low.startswith(tr):
+            res = t[len(tr):].strip()
+            if res:
+                return res
+
+    if low in ("нарисуй", "нарисовать", "картинка", "сгенерируй арт"):
+        return ""
+
+    return None
 
 
 # --- Хэндлеры команд и навигации Telegram ---
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    """Приветствие бота без упоминания хостинга Render."""
+    """Аккуратное приветствие бота."""
     log_mgr.add_user_activity(message.from_user, "КОМАНДА", "/start (запуск бота)")
     reset_user_chat(message.from_user.id)
     cur_mode = get_user_mode(message.from_user.id)
@@ -576,16 +624,15 @@ async def cmd_start(message: types.Message):
     active_kb = get_admin_reply_keyboard() if is_admin else get_main_reply_keyboard()
 
     welcome_text = (
-        f"👋 *Привет, {message.from_user.first_name}!*\n\n"
-        f"Я интеллектуальный ассистент с искусственным интеллектом на базе *Google Gemini* ({config.GEMINI_MODEL}).\n\n"
-        f"🎭 *Текущий режим:* {mode_title}\n\n"
-        f"💡 *Что я умею:*\n"
-        f"• 💬 Отвечать на любые вопросы и искать информацию\n"
-        f"• 🎨 Создавать изображения и арты по описанию\n"
-        f"• 📸 Анализировать присланные вами фотографии\n"
-        f"• 💻 Писать, проверять и объяснять программный код\n"
-        f"• 🧠 Запоминать контекст нашей беседы\n\n"
-        f"Используйте кнопки нижнего меню или пишите в чат!"
+        f"✨ *Привет, {message.from_user.first_name}!*\n\n"
+        f"Я твой персональный ассистент на базе искусственного интеллекта *Google Gemini*.\n\n"
+        f"🎭 *Режим общения:* {mode_title}\n\n"
+        "💡 *Чем могу помочь:*\n"
+        "• 💬 Найти ответ на любой вопрос и объяснить сложные вещи\n"
+        "• 🎨 Сгенерировать фото или арт в высоком разрешении\n"
+        "• 📸 Распознать и проанализировать присланную фотографию\n"
+        "• 💻 Написать, разобрать или исправить программный код\n\n"
+        "Выберите действие в меню внизу или просто напишите мне сообщение! 👇"
     )
     await safe_send_message(message.chat.id, welcome_text, reply_markup=active_kb)
 
@@ -596,8 +643,8 @@ async def cmd_menu_modes(message: types.Message):
     log_mgr.add_user_activity(message.from_user, "МЕНЮ", "Открыл выбор режимов")
     cur_mode = get_user_mode(message.from_user.id)
     text = (
-        "🎭 *Интерактивный выбор режима общения:*\n\n"
-        "Выберите стиль, в котором бот будет отвечать на ваши запросы:\n\n"
+        "🎭 *Выбор режима общения:*\n\n"
+        "Выберите стиль, в котором я буду отвечать:\n\n"
     )
     for k, v in MODES.items():
         mark = "👉 " if k == cur_mode else "• "
@@ -622,7 +669,7 @@ async def cmd_reset(message: types.Message):
 
     await safe_send_message(
         message.chat.id,
-        f"🧹 *Память диалога очищена.*\nТекущий режим: *{MODES[cur_mode]['title']}*. Жду ваш вопрос!",
+        f"🧹 *Память диалога очищена.*\nТекущий режим: *{MODES[cur_mode]['title']}*. Жду ваш новый вопрос!",
         reply_markup=active_kb
     )
 
@@ -640,13 +687,13 @@ async def cmd_help(message: types.Message):
     active_kb = get_admin_reply_keyboard() if is_admin else get_main_reply_keyboard()
 
     help_text = (
-        "📖 *Руководство по боту:*\n\n"
-        "1. *Общение и поиск:* Просто пишите вопросы или что хотите найти — я подробно отвечу.\n"
-        "2. *Анализ фото:* Отправьте мне любую фотографию (с вопросом или без), и я разберу, что на ней изображено.\n"
-        "3. *Генерация картинок:* Нажмите «🎨 Нарисовать арт» или напишите «_Нарисуй кота-самурая_» / команду `/image <текст>`.\n"
-        "4. *Режимы:* Нажмите «🎭 Сменить режим» для переключения персон (Кодер, Креатив, Репетитор и др.).\n"
-        "5. *Новый разговор:* Кнопка «💬 Новый диалог» сбрасывает память контекста.\n"
-        "6. *Команды в чате:* Наберите знак `/` прямо в поле ввода, чтобы увидеть список доступных команд."
+        "📖 *Как пользоваться ботом:*\n\n"
+        "1. *Вопросы и поиск:* Просто отправляйте текстовые сообщения.\n"
+        "2. *Генерация картинок:* Напишите команду `/image <описание>` или фразу «*Нарисуй кота в космосе*» — бот сразу пришлет готовое изображение.\n"
+        "3. *Анализ фото:* Пришлите любую фотографию с вопросом — бот распознает объекты и даст ответ.\n"
+        "4. *Смена стиля ответов:* Кнопка «🎭 Сменить режим» позволяет переключаться между Программистом, Писателем, Репетитором и др.\n"
+        "5. *Очистка памяти:* Кнопка «💬 Новый диалог» сбрасывает контекст текущей темы.\n"
+        "6. *Команды:* Наберите `/` в поле ввода, чтобы увидеть список подсказок."
     )
     await safe_send_message(message.chat.id, help_text, reply_markup=active_kb)
 
@@ -654,13 +701,13 @@ async def cmd_help(message: types.Message):
 @dp.message(Command("ping"))
 @dp.message(F.text == "📊 Статус / Пинг")
 async def cmd_ping(message: types.Message):
-    """Проверка доступности сервера и пинг всех сетей Gemini (2.5, 3.5, 3.8, latest)."""
+    """Проверка доступности сервера и задержки моделей Gemini."""
     log_mgr.add_user_activity(message.from_user, "СТАТУС", "Запросил /ping и проверку моделей")
     await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
 
     wait_msg = await bot.send_message(
         chat_id=message.chat.id,
-        text="🏓 *Тестирую отклик сервера и проверяю доступность моделей Gemini...*"
+        text="🏓 *Проверяю отклик сервера и нейросетей...*"
     )
 
     uptime_sec = int(time.time() - START_TIME)
@@ -669,11 +716,10 @@ async def cmd_ping(message: types.Message):
     uptime_str = f"{hours}ч {minutes}м {seconds}с"
     cur_mode = get_user_mode(message.from_user.id)
 
-    # Проверяем доступность и задержку моделей
     models_report = await probe_gemini_models()
 
     status_text = (
-        "🏓 *Статус системы и моделей Google:*\n\n"
+        "🏓 *Статус системы и нейросетей Google:*\n\n"
         "🖥 *Сервер и бот:*\n"
         f"• *Статус:* Активен 🟢\n"
         f"• *Непрерывный аптайм:* `{uptime_str}`\n"
@@ -702,7 +748,6 @@ async def cmd_admin(message: types.Message):
     user = message.from_user
     parts = message.text.split(maxsplit=1)
 
-    # Проверка пароля в команде
     if len(parts) > 1:
         entered_secret = parts[1].strip()
         if entered_secret == config.ADMIN_SECRET:
@@ -714,7 +759,6 @@ async def cmd_admin(message: types.Message):
             await safe_send_message(message.chat.id, "❌ *Неверный пароль администратора.*")
             return
 
-    # Если пользователь не авторизован
     if user.id not in authenticated_admins:
         await safe_send_message(
             message.chat.id,
@@ -722,7 +766,6 @@ async def cmd_admin(message: types.Message):
         )
         return
 
-    # Авторизованному админу выдаем админскую клавиатуру и детальные логи пользователей
     recent_logs = log_mgr.get_recent(count=10)
     feed_text = format_user_activity_feed(recent_logs)
 
@@ -831,7 +874,7 @@ async def handle_callbacks(callback: CallbackQuery):
         await callback.answer("Стиль выбран!")
         await bot.send_message(
             chat_id=user_id,
-            text=f"🎨 *Выбран стиль:* _{style_prompt}_\n\nТеперь напишите, что именно нарисовать в этом стиле (например: `неоновый дракон в небе`).",
+            text=f"🎨 *Выбран стиль:* _{style_prompt}_\n\nТеперь напишите, что именно нарисовать (например: `неоновый дракон в небе`).",
             parse_mode=ParseMode.MARKDOWN
         )
         return
@@ -951,7 +994,7 @@ async def handle_incoming_video(message: types.Message):
     log_mgr.total_videos += 1
 
     log_mgr.add_user_activity(user, "ВИДЕО", log_content, bot_reply="Видео зафиксировано", status="OK")
-    await message.reply("🎥 Я получил ваше видео и сохранил его в историю! Опишите текстом, чем я могу помочь.")
+    await message.reply("🎥 Я получил ваше видео! Задайте текстом вопрос, если нужна помощь с ним.")
 
 
 @dp.message(F.voice)
@@ -971,7 +1014,7 @@ async def handle_incoming_document(message: types.Message):
     log_content = f"Прислал ДОКУМЕНТ «{doc_name}»"
 
     log_mgr.add_user_activity(user, "ДОКУМЕНТ", log_content, bot_reply="Документ принят", status="OK")
-    await message.reply(f"📄 Документ «{doc_name}» получен!")
+    await message.reply(f"📄 Документ «{doc_name}» успешно получен!")
 
 
 @dp.message(Command("image", "img", "draw", "art"))
@@ -979,20 +1022,6 @@ async def cmd_image(message: types.Message):
     parts = message.text.split(maxsplit=1)
     prompt = parts[1].strip() if len(parts) > 1 else ""
     await handle_generate_image(message, prompt)
-
-
-IMAGE_TRIGGERS = (
-    "нарисуй ",
-    "нарисуй:",
-    "сгенерируй картинку ",
-    "сгенерируй изображение ",
-    "сделай картинку ",
-    "создай картинку ",
-    "нарисуй мне ",
-    "изобрази ",
-    "draw ",
-    "generate image ",
-)
 
 
 # --- Обработка текстовых запросов ---
@@ -1003,13 +1032,11 @@ async def handle_message(message: types.Message):
     user_id = user.id
     user_prompt = message.text
 
-    # Проверка на триггер генерации картинок
-    lower_text = user_prompt.lower().strip()
-    for trigger in IMAGE_TRIGGERS:
-        if lower_text.startswith(trigger):
-            img_prompt = user_prompt[len(trigger):].strip()
-            await handle_generate_image(message, img_prompt)
-            return
+    # Проверка на намерение нарисовать картинку
+    extracted_prompt = extract_image_prompt(user_prompt)
+    if extracted_prompt is not None:
+        await handle_generate_image(message, extracted_prompt)
+        return
 
     await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
     chat_session = get_or_create_chat(user_id)
@@ -1029,6 +1056,7 @@ async def handle_message(message: types.Message):
         if not answer:
             answer = "Извините, не удалось сформировать ответ. Попробуйте перефразировать вопрос."
 
+        # Страховка от внешних ссылок генераторов в ответе
         log_mgr.total_messages += 1
         log_mgr.add_user_activity(
             user=user,
@@ -1291,7 +1319,7 @@ async def keep_alive_task():
 # --- Главная функция запуска ---
 
 async def main():
-    logger.info("Запуск Telegram Gemini бота с расширенным меню, логированием и мультимодельным пингом...")
+    logger.info("Запуск Telegram Gemini бота...")
 
     web_app = create_web_app()
     runner = web.AppRunner(web_app)
@@ -1303,9 +1331,7 @@ async def main():
     ping_bg_task = asyncio.create_task(keep_alive_task())
 
     try:
-        # Установка всплывающих подсказок команд Telegram при вводе "/"
         await setup_bot_commands()
-
         logger.info("🤖 Запуск Long Polling для Telegram...")
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
